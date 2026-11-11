@@ -1,3 +1,4 @@
+import java.io.File
 import java.util.Properties
 
 plugins {
@@ -11,9 +12,14 @@ val localProps = Properties().apply {
     if (f.exists()) f.inputStream().use { load(it) }
 }
 // Release signing key lives OUTSIDE the repo (default ~/akademos-signing/keystore.properties).
+val signingFile = file(System.getenv("AKADEMOS_SIGNING") ?: "${System.getProperty("user.home")}/akademos-signing/keystore.properties")
 val signingProps = Properties().apply {
-    val f = file(System.getenv("AKADEMOS_SIGNING") ?: "${System.getProperty("user.home")}/akademos-signing/keystore.properties")
-    if (f.exists()) f.inputStream().use { load(it) }
+    if (signingFile.exists()) signingFile.inputStream().use { load(it) }
+    // If the folder was moved, find the key next to keystore.properties instead of at the old path.
+    getProperty("storeFile")?.let { path ->
+        val beside = File(signingFile.parentFile, File(path).name)
+        if (!File(path).exists() && beside.exists()) setProperty("storeFile", beside.absolutePath)
+    }
 }
 
 // `./gradlew assembleDebug -Ppreview` builds a sample-data preview that never touches the server.
