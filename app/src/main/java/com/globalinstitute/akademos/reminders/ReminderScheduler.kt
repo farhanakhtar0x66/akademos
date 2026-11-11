@@ -9,6 +9,7 @@ import android.content.Intent
 import android.media.AudioAttributes
 import android.media.RingtoneManager
 import android.os.Build
+import com.globalinstitute.akademos.data.Plans
 import com.globalinstitute.akademos.data.Prefs
 import com.globalinstitute.akademos.data.Profile
 import com.globalinstitute.akademos.data.School
@@ -28,16 +29,29 @@ data class ReminderSlot(
     val weekday: Int,       // 1 = Monday
     val start: String,      // HH:mm:ss
     val end: String,
+    val date: String? = null, // the exact day (from the check-in); null = every week
 )
 
 object ReminderKind {
     const val START = "start"
     const val END = "end"
     const val FOLLOW_UP = "followup"
+    const val MONEY = "money"
+    const val CHECKIN = "checkin"
+    const val PLAN = "plan"         // a button on the check-in notification
+    const val CLAIMS = "claims"     // administrator: someone says they paid
+    const val DISMISS = "dismiss"
 }
 
 object ReminderScheduler {
     const val CHANNEL_ALERTS = "class_alerts"
+    const val CHANNEL_MONEY = "money_reminders"
+    const val CHANNEL_CHECKIN = "daily_checkin"
+    private val MONEY_TIME: LocalTime = LocalTime.of(9, 0)
+    private val MONEY_EVENING: LocalTime = LocalTime.of(18, 0)
+    val CHECKIN_TIME: LocalTime = LocalTime.of(15, 0)
+    private val CHECKIN_NUDGE: LocalTime = LocalTime.of(15, 45)
+    private const val DAYS_AHEAD = 7L
     private val json = Json { ignoreUnknownKeys = true }
 
     fun createChannels(ctx: Context) {
@@ -54,21 +68,42 @@ object ReminderScheduler {
             lockscreenVisibility = android.app.Notification.VISIBILITY_PUBLIC
         }
         nm.createNotificationChannel(ch)
+        nm.createNotificationChannel(NotificationChannel(CHANNEL_MONEY, "Fee and salary reminders", NotificationManager.IMPORTANCE_DEFAULT).apply {
+            description = "A morning reminder about fees that are due and salaries to pay"
+        })
+        nm.createNotificationChannel(NotificationChannel(CHANNEL_CHECKIN, "Daily class check-in", NotificationManager.IMPORTANCE_HIGH).apply {
+            description = "At 3 PM: are you taking classes today, and when?"
+            enableVibration(true)
+        })
     }
 
-    /** Save the timetable this person should be reminded about, then (re)arm the alarms. */
-    fun sync(ctx: Context, school: School, me: Profile) {
-        val mine = school.slots.filter { slot ->
-            val b = school.batch(slot.batchId) ?: return@filter false
-            me.isStaff && (Prefs.remindAllClasses || b.teacherId == null || b.teacherId == me.id)
-        }.mapNotNull { slot ->
-            val b = school.batch(slot.batchId) ?: return@mapNotNull null
-            val subj = school.subject(b.subjectId)
-            ReminderSlot(slot.id ?: return@mapNotNull null, b.id!!, b.name, subj?.color ?: "#5B3E8C",
-                slot.weekday, slot.startTime, slot.endTime)
+    /**
+     * Save the classes this person should be reminded about for the next week, with every
+     * teacher's daily check-in applied, then (re)arm the alarms.
+     */
+    fun sync(ctx: Context, school: School, me: Profile, plans: Plans) {
+        if (!me.isStaff) return
+        Prefs.hasOwnClasses = school.batches.any { it.teacherId == me.id } || plans.classes.any { it.teacherId == me.id }
+        val today = LocalDate.now()
+        val mine = (0..DAYS_AHEAD).flatMap { off ->
+            val day = today.plusDays(off)
+            plans.sessions(school, day).filter { se ->
+                se.teacherId == me.id || se.teacherId == null || (me.isAdmin && Prefs.remindAllClasses)
+            }.mapNotNull { se ->
+                val b = school.batch(se.batchId) ?: return@mapNotNull null
+                ReminderSlot("${se.key}:$day", b.id!!, b.name, school.subject(b.subjectId)?.color ?: "#5B3E8C",
+                    day.dayOfWeek.value, se.startTime, se.endTime, day.toString())
+            }
         }
         Prefs.scheduleCache = json.encodeToString(kotlinx.serialization.builtins.ListSerializer(ReminderSlot.serializer()), mine)
         rearm(ctx)
+    }
+
+    /** Load everyone's check-ins for the coming week and re-arm this person's reminders. */
+    suspend fun refresh(ctx: Context, me: Profile, school: School) {
+        if (!me.isStaff) return
+        val today = LocalDate.now()
+        sync(ctx, school, me, com.globalinstitute.akademos.data.Repo.plans(today.toString(), today.plusDays(DAYS_AHEAD).toString()))
     }
 
     fun cached(): List<ReminderSlot> = runCatching {
@@ -86,16 +121,46 @@ object ReminderScheduler {
         val old = Prefs.scheduledCodes
         val now = LocalDateTime.now()
         val newCodes = mutableSetOf<String>()
-        if (Prefs.remindersOn && Prefs.lastUserId != null && Prefs.lastRole != "parent") {
+        val role = Prefs.lastRole
+        val signedIn = Prefs.lastUserId != null
+        val staff = role == "admin" || role == "teacher"
+        if (Prefs.remindersOn && signedIn && staff) {
             for (s in cached()) {
                 for (kind in listOf(ReminderKind.START, ReminderKind.END)) {
                     val t = LocalTime.parse(if (kind == ReminderKind.START) s.start else s.end)
-                    val at = nextOccurrence(now, s.weekday, t)
+                    val at = if (s.date != null) LocalDate.parse(s.date).atTime(t) else nextOccurrence(now, s.weekday, t)
+                    if (!at.isAfter(now.plusSeconds(5))) continue
                     val key = "${s.slotId}:$kind"
                     newCodes += key
                     set(ctx, am, key.hashCode(), at, intent(ctx, kind, s, at.toLocalDate()))
                 }
             }
+        }
+        // 3 PM: "Are you taking classes today?" (and a nudge at 3:45 if there's no answer yet)
+        if (Prefs.checkIn && signedIn && (role == "teacher" || (role == "admin" && Prefs.hasOwnClasses))) {
+            for ((i, t) in listOf(CHECKIN_TIME, CHECKIN_NUDGE).withIndex()) {
+                val at = next(now, t)
+                val key = "checkin:$i"
+                newCodes += key
+                set(ctx, am, key.hashCode(), at, simple(ctx, ReminderKind.CHECKIN, at.toLocalDate()).putExtra("nudge", i == 1))
+            }
+        }
+        if (Prefs.moneyReminders && signedIn && (role == "admin" || role == "parent")) {
+            val at = next(now, MONEY_TIME)
+            newCodes += "money:daily"
+            set(ctx, am, "money:daily".hashCode(), at, moneyIntent(ctx, at.toLocalDate()))
+            if (role == "parent") {
+                // Overdue fees get a second reminder in the evening.
+                val eve = next(now, MONEY_EVENING)
+                newCodes += "money:evening"
+                set(ctx, am, "money:evening".hashCode(), eve, moneyIntent(ctx, eve.toLocalDate()).putExtra("evening", true))
+            }
+        }
+        // Administrator: look for new "I've paid" messages every 30 minutes, 8 AM to 9 PM.
+        if (signedIn && role == "admin") {
+            val at = nextClaimCheck(now)
+            newCodes += "claims:poll"
+            set(ctx, am, "claims:poll".hashCode(), at, simple(ctx, ReminderKind.CLAIMS, at.toLocalDate()), exact = false)
         }
         (old - newCodes).forEach { cancel(ctx, am, it.hashCode()) }
         Prefs.scheduledCodes = newCodes
@@ -107,6 +172,48 @@ object ReminderScheduler {
         val am = ctx.getSystemService(AlarmManager::class.java)
         val i = intent(ctx, ReminderKind.START, s, LocalDate.now()).putExtra("test", true)
         set(ctx, am, "test-reminder".hashCode(), LocalDateTime.now().plusSeconds(seconds), i)
+    }
+
+    private fun next(now: LocalDateTime, t: LocalTime): LocalDateTime =
+        now.toLocalDate().atTime(t).let { if (it.isAfter(now.plusSeconds(5))) it else it.plusDays(1) }
+
+    private fun nextClaimCheck(now: LocalDateTime): LocalDateTime {
+        val cand = now.plusMinutes(30)
+        return when {
+            cand.toLocalTime().isBefore(LocalTime.of(8, 0)) -> cand.toLocalDate().atTime(8, 0)
+            cand.toLocalTime().isAfter(LocalTime.of(21, 0)) -> cand.toLocalDate().plusDays(1).atTime(8, 0)
+            else -> cand
+        }
+    }
+
+    fun simple(ctx: Context, kind: String, date: LocalDate) = Intent(ctx, ReminderReceiver::class.java).apply {
+        action = "akademos.REMINDER"
+        putExtra("kind", kind); putExtra("batchId", kind); putExtra("date", date.toString())
+    }
+
+    /** Debug preview only: show the 3 PM check-in in a few seconds. */
+    fun sendCheckInTest(ctx: Context) {
+        val am = ctx.getSystemService(AlarmManager::class.java)
+        set(ctx, am, "checkin:test".hashCode(), LocalDateTime.now().plusSeconds(5),
+            simple(ctx, ReminderKind.CHECKIN, LocalDate.now()).putExtra("snoozed", true).putExtra("test", true))
+    }
+
+    /** Debug preview only: run the "someone says they paid" check in a few seconds. */
+    fun sendClaimsTest(ctx: Context) {
+        val am = ctx.getSystemService(AlarmManager::class.java)
+        set(ctx, am, "claims:test".hashCode(), LocalDateTime.now().plusSeconds(5),
+            simple(ctx, ReminderKind.CLAIMS, LocalDate.now()).putExtra("snoozed", true))
+    }
+
+    private fun moneyIntent(ctx: Context, date: LocalDate) = Intent(ctx, ReminderReceiver::class.java).apply {
+        action = "akademos.REMINDER"
+        putExtra("kind", ReminderKind.MONEY); putExtra("batchId", "money"); putExtra("date", date.toString())
+    }
+
+    /** Debug preview only: run the morning fee/salary check in a few seconds. */
+    fun sendMoneyTest(ctx: Context) {
+        val am = ctx.getSystemService(AlarmManager::class.java)
+        set(ctx, am, "money:test".hashCode(), LocalDateTime.now().plusSeconds(5), moneyIntent(ctx, LocalDate.now()).putExtra("snoozed", true))
     }
 
     fun scheduleFollowUp(ctx: Context, batchId: String, title: String, date: String, minutes: Long = 15) {
@@ -143,10 +250,12 @@ object ReminderScheduler {
             putExtra("color", s.color)
         }
 
-    private fun set(ctx: Context, am: AlarmManager, code: Int, at: LocalDateTime, i: Intent) {
+    private fun set(ctx: Context, am: AlarmManager, code: Int, at: LocalDateTime, i: Intent, exact: Boolean = true) {
         val pi = PendingIntent.getBroadcast(ctx, code, i, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
         val millis = at.atZone(ZoneId.systemDefault()).toInstant().toEpochMilli()
-        if (canExact(ctx)) {
+        if (!exact) {
+            am.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, millis, pi)
+        } else if (canExact(ctx)) {
             am.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, millis, pi)
         } else {
             am.setWindow(AlarmManager.RTC_WAKEUP, millis, 60_000, pi)

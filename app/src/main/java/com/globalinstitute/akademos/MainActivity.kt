@@ -15,6 +15,10 @@ import androidx.biometric.BiometricPrompt
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.windowInsetsTopHeight
+import androidx.compose.foundation.layout.statusBars
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -56,7 +60,17 @@ class MainActivity : FragmentActivity() {
                     )
                 }
                 androidx.compose.material3.Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
-                    AppRoot(this@MainActivity)
+                    Box(Modifier.fillMaxSize()) {
+                        AppRoot(this@MainActivity)
+                        // keeps scrolled content from running under the clock and battery icons
+                        val bg = MaterialTheme.colorScheme.background
+                        androidx.compose.foundation.layout.Column(Modifier.align(androidx.compose.ui.Alignment.TopStart).fillMaxWidth()) {
+                            Box(Modifier.fillMaxWidth()
+                                .windowInsetsTopHeight(androidx.compose.foundation.layout.WindowInsets.statusBars)
+                                .background(bg.copy(alpha = 0.94f)))
+
+                        }
+                    }
                 }
             }
         }

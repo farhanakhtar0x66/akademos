@@ -119,11 +119,20 @@ object Demo {
         Invite("i2", Roles.PARENT, "Riya's mother", Instant.now().minusSeconds(86400 * 10).toString(), Instant.now().minusSeconds(86400 * 8).toString(), Instant.now().minusSeconds(86400 * 9).toString()),
     )
 
-    private fun visibleStudents() = if (role == Roles.PARENT) students.filter { it.id == CHILD } else students
+    private fun myBatchIds(): Set<String> = when (role) {
+        Roles.TEACHER -> batches.filter { it.teacherId == TEACHER_ID }.mapNotNull { it.id }.toSet()
+        Roles.PARENT -> members.filter { it.studentId == CHILD }.map { it.batchId }.toSet()
+        else -> batches.mapNotNull { it.id }.toSet()
+    }
+    private fun visibleStudents() = when (role) {
+        Roles.PARENT -> students.filter { it.id == CHILD }
+        Roles.TEACHER -> myBatchIds().let { mine -> students.filter { st -> members.any { it.studentId == st.id && it.batchId in mine } } }
+        else -> students
+    }
 
     // ------------------------------------------------------------------ API mirror of Repo
     suspend fun myProfile(): Profile? { net(); return profile }
-    suspend fun school(): School { net(); return School(classes.toList(), subjects.toList(), batches.toList(), slots.toList(), if (role == Roles.PARENT) emptyList() else staff.toList()) }
+    suspend fun school(): School { net(); val mine = myBatchIds(); return School(classes.toList(), subjects.toList(), batches.filter { it.id in mine }, slots.filter { it.batchId in mine }, if (role == Roles.PARENT) emptyList() else staff.toList()) }
     suspend fun saveClass(c: SchoolClass) { net(); if (c.id == null) classes += c.copy(id = id()) else classes.replaceAll { if (it.id == c.id) c else it } }
     suspend fun deleteClass(id: String) { classes.removeAll { it.id == id } }
     suspend fun saveSubject(s: Subject) { net(); if (s.id == null) subjects += s.copy(id = id()) else subjects.replaceAll { if (it.id == s.id) s else it } }
@@ -142,8 +151,8 @@ object Demo {
     }
     suspend fun deleteBatch(id: String) { batches.removeAll { it.id == id }; slots.removeAll { it.batchId == id } }
 
-    suspend fun attendance(batchId: String, date: String) = attendance.filter { it.batchId == batchId && it.date == date && canSee(it.studentId) }.also { net() }
-    suspend fun attendanceOn(date: String) = attendance.filter { it.date == date && canSee(it.studentId) }
+    suspend fun attendance(batchId: String, date: String) = attendance.filter { it.batchId == batchId && it.date == date && canSee(it.studentId) && it.batchId in myBatchIds() }.also { net() }
+    suspend fun attendanceOn(date: String) = attendance.filter { it.date == date && canSee(it.studentId) && it.batchId in myBatchIds() }
     suspend fun saveAttendance(batchId: String, date: String, statuses: Map<String, String>, existing: List<Attendance>) {
         net()
         statuses.forEach { (sid, st) ->
@@ -157,7 +166,7 @@ object Demo {
         attendance.replaceAll { if (it.batchId == batchId && it.date == date && it.studentId in ids) it.copy(leftAt = if (left) Instant.now().toString() else null) else it }
     }
     suspend fun studentAttendance(studentId: String, limit: Long) =
-        attendance.filter { it.studentId == studentId && canSee(studentId) }.sortedByDescending { it.date }.take(limit.toInt()).also { net() }
+        attendance.filter { it.studentId == studentId && canSee(studentId) && it.batchId in myBatchIds() }.sortedByDescending { it.date }.take(limit.toInt()).also { net() }
 
     suspend fun assessments(batchId: String) = tests.filter { it.batchId == batchId }.sortedByDescending { it.heldOn }.also { net() }
     suspend fun createAssessment(a: Assessment): Assessment { net(); return a.copy(id = id()).also { tests += it } }
@@ -184,12 +193,13 @@ object Demo {
     suspend fun downloadAnswerSheet(path: String): ByteArray { delay(400); return uploaded[path] ?: sampleSheet() }
     suspend fun studentMarks(studentId: String): List<MarkWithTest> {
         net()
-        return marks.filter { it.studentId == studentId && canSee(studentId) }.map { m ->
+        val mine = myBatchIds()
+        return marks.filter { m -> m.studentId == studentId && canSee(studentId) && tests.any { it.id == m.assessmentId && it.batchId in mine } }.map { m ->
             MarkWithTest(m.id, m.assessmentId, m.studentId, m.score, m.remarks, m.answerSheetPath, tests.firstOrNull { it.id == m.assessmentId })
         }.sortedByDescending { it.assessments?.heldOn ?: "" }
     }
 
-    suspend fun createInvite(r: String, label: String, studentIds: List<String>, hours: Int): String {
+    suspend fun createInvite(r: String, label: String, studentIds: List<String>, hours: Int, batchIds: List<String> = emptyList()): String {
         net()
         val a = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
         val rnd = java.security.SecureRandom()
@@ -216,7 +226,119 @@ object Demo {
         )
     }
 
-    private fun canSee(studentId: String) = role != Roles.PARENT || studentId == CHILD
+    // ------------------------------------------------------------------ money
+    private fun monthStart(back: Long) = LocalDate.now().withDayOfMonth(1).minusMonths(back).toString()
+    private val fees = mutableListOf<StudentFee>().apply {
+        students.forEach { st ->
+            when (st.classId) {
+                "c10" -> add(StudentFee(st.id!!, 3500.0, 10))
+                "c12" -> add(StudentFee(st.id!!, 4500.0, 5))
+                "c9" -> add(StudentFee(st.id!!, 3000.0, 10))
+            }
+        }
+    }
+    private val feePays = mutableListOf<FeePayment>().apply {
+        for (back in 5L downTo 0L) {
+            val m = monthStart(back)
+            fees.forEachIndexed { i, f ->
+                val skip = (i * 7 + back.toInt() * 3) % 11 == 0
+                if (back == 0L) {
+                    if (f.studentId == CHILD) return@forEachIndexed
+                    when (i % 5) {
+                        0, 1, 2 -> add(FeePayment(id(), f.studentId, m, f.monthlyFee, LocalDate.now().withDayOfMonth(minOf(3 + i % 5, LocalDate.now().dayOfMonth)).toString(), if (i % 2 == 0) "upi" else "cash"))
+                        3 -> add(FeePayment(id(), f.studentId, m, f.monthlyFee / 2, LocalDate.now().withDayOfMonth(1).toString(), "cash", "Rest next week"))
+                    }
+                } else if (!skip) {
+                    add(FeePayment(id(), f.studentId, m, f.monthlyFee, LocalDate.parse(m).plusDays((i % 9).toLong()).toString(), if (i % 3 == 0) "cash" else "upi"))
+                }
+            }
+        }
+    }
+    private val payees = mutableListOf(
+        Payee("p1", "Meera Rao", "English & Business", 18000.0, 1),
+        Payee("p2", "Arjun Mehta", "Science & Maths", 16000.0, 1),
+        Payee("p3", "Sunil Kumar", "Caretaker", 7000.0, 5),
+    )
+    private val salaryPays = mutableListOf<SalaryPayment>().apply {
+        for (back in 5L downTo 1L) payees.forEach { p ->
+            add(SalaryPayment(id(), p.id!!, monthStart(back), p.monthlySalary, LocalDate.parse(monthStart(back)).plusDays(p.payDay.toLong()).toString(), "bank"))
+        }
+        add(SalaryPayment(id(), "p1", monthStart(0), 18000.0, LocalDate.now().withDayOfMonth(1).toString(), "bank"))
+    }
+
+    suspend fun studentFees(): List<StudentFee> { net(); return fees.filter { canSee(it.studentId) } }
+    suspend fun saveStudentFee(f: StudentFee) { net(); fees.removeAll { it.studentId == f.studentId }; fees += f }
+    suspend fun feePayments(fromMonth: String) = feePays.filter { it.forMonth >= fromMonth && canSee(it.studentId) }.sortedByDescending { it.paidOn }.also { net() }
+    suspend fun studentFeePayments(studentId: String) =
+        feePays.filter { it.studentId == studentId && canSee(studentId) }.sortedWith(compareByDescending<FeePayment> { it.forMonth }.thenByDescending { it.paidOn }).also { net() }
+    suspend fun addFeePayment(p: FeePayment) { net(); feePays += p.copy(id = id(), paidOn = p.paidOn ?: LocalDate.now().toString()) }
+    suspend fun deleteFeePayment(id: String) { feePays.removeAll { it.id == id } }
+    suspend fun payees() = payees.sortedBy { it.name }.also { net() }
+    suspend fun savePayee(p: Payee) { net(); if (p.id == null) payees += p.copy(id = id()) else payees.replaceAll { if (it.id == p.id) p else it } }
+    suspend fun salaryPayments(fromMonth: String) = salaryPays.filter { it.forMonth >= fromMonth }.sortedByDescending { it.paidOn }.also { net() }
+    suspend fun addSalaryPayment(p: SalaryPayment) { net(); salaryPays += p.copy(id = id(), paidOn = p.paidOn ?: LocalDate.now().toString()) }
+    suspend fun deleteSalaryPayment(id: String) { salaryPays.removeAll { it.id == id } }
+
+    private fun canSee(studentId: String) = when (role) {
+        Roles.PARENT -> studentId == CHILD
+        Roles.TEACHER -> visibleStudents().any { it.id == studentId }
+        else -> true
+    }
+
+    // ------------------------------------------------------------------ daily check-in
+    private val dayPlans = mutableListOf(DayPlan("demo-t2", LocalDate.now().toString(), PlanMode.USUAL))
+    private val dayClasses = mutableListOf<DayClass>()
+    suspend fun plans(from: String, to: String): Plans {
+        net()
+        val mine: (String) -> Boolean = { t -> role == Roles.ADMIN || t == profile.id }
+        return Plans(dayPlans.filter { it.date in from..to && mine(it.teacherId) }, dayClasses.filter { it.date in from..to && mine(it.teacherId) })
+    }
+    suspend fun savePlan(date: String, mode: String, list: List<DayClass>) {
+        net()
+        val me = profile.id
+        dayPlans.removeAll { it.teacherId == me && it.date == date }; dayPlans += DayPlan(me, date, mode)
+        dayClasses.removeAll { it.teacherId == me && it.date == date }
+        if (mode == PlanMode.CUSTOM) list.forEach { dayClasses += it.copy(id = id(), teacherId = me, date = date) }
+    }
+
+    // ------------------------------------------------------------------ "I've paid"
+    private val claims = mutableListOf(
+        FeeClaim("cl1", "st10-4", monthStart(0), 3500.0, "upi", "Paid on GPay this morning", ClaimStatus.PENDING, Instant.now().minusSeconds(5400).toString()),
+    )
+    suspend fun feeClaims(studentId: String?) = claims.filter { (studentId == null || it.studentId == studentId) && canSee(it.studentId) && role != Roles.TEACHER }
+        .sortedByDescending { it.createdAt }.also { net() }
+    suspend fun addFeeClaim(c: FeeClaim) {
+        net()
+        if (claims.any { it.studentId == c.studentId && it.forMonth == c.forMonth && it.status == ClaimStatus.PENDING })
+            error("duplicate key value violates unique constraint \"fee_claims_one_open\"")
+        claims += c.copy(id = id(), status = ClaimStatus.PENDING, createdAt = Instant.now().toString())
+    }
+    suspend fun confirmClaim(cid: String, amount: Double?) {
+        net()
+        val c = claims.firstOrNull { it.id == cid && it.status == ClaimStatus.PENDING } ?: error("This was already handled")
+        feePays += FeePayment(id(), c.studentId, c.forMonth, amount ?: c.amount, c.createdAt?.take(10), c.method, c.note ?: "Reported paid in the app")
+        claims.replaceAll { if (it.id == cid) it.copy(status = ClaimStatus.CONFIRMED, resolvedAt = Instant.now().toString()) else it }
+    }
+    suspend fun rejectClaim(cid: String) {
+        net()
+        claims.replaceAll { if (it.id == cid) it.copy(status = ClaimStatus.REJECTED, resolvedAt = Instant.now().toString()) else it }
+    }
+
+    private val rates = mutableListOf(TeacherRate(TEACHER_ID, 500.0))
+    suspend fun teacherRates() = rates.toList().also { net() }
+    suspend fun saveRate(r: TeacherRate) { net(); rates.removeAll { it.teacherId == r.teacherId }; rates += r }
+    suspend fun classesTaken(from: String, to: String): List<ClassTaken> {
+        net()
+        return attendance.filter { it.date in from..to }.groupBy { it.batchId to it.date }.map { (k, rows) ->
+            ClassTaken(batches.firstOrNull { it.id == k.first }?.teacherId, k.first, k.second, rows.count { it.status != Status.ABSENT }, rows.size)
+        }
+    }
+
+    suspend fun removeUser(userId: String) { net(); staff.removeAll { it.id == userId }; parents.removeAll { it.id == userId } }
+    suspend fun deleteStudent(sid: String) {
+        net(); students.removeAll { it.id == sid }; members.removeAll { it.studentId == sid }
+        attendance.removeAll { it.studentId == sid }; marks.removeAll { it.studentId == sid }; fees.removeAll { it.studentId == sid }
+    }
 
     /** A drawn "answer sheet" so the viewer has something to show. */
     private fun sampleSheet(): ByteArray {

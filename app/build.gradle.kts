@@ -16,7 +16,8 @@ val signingProps = Properties().apply {
     if (f.exists()) f.inputStream().use { load(it) }
 }
 
-fun secret(name: String): String =
+// `./gradlew assembleDebug -Ppreview` builds a sample-data preview that never touches the server.
+fun secret(name: String): String = if (project.hasProperty("preview")) "" else
     (localProps.getProperty(name) ?: System.getenv(name) ?: "").trim()
 
 android {
@@ -27,10 +28,11 @@ android {
         applicationId = "com.globalinstitute.akademos"
         minSdk = 26
         targetSdk = 36
-        versionCode = 1
-        versionName = "1.0.0"
+        versionCode = 2
+        versionName = "1.1.0"
         buildConfigField("String", "SUPABASE_URL", "\"${secret("SUPABASE_URL")}\"")
         buildConfigField("String", "SUPABASE_ANON_KEY", "\"${secret("SUPABASE_ANON_KEY")}\"")
+        buildConfigField("Boolean", "DEMO", "false")
     }
 
     signingConfigs {
@@ -48,6 +50,17 @@ android {
             isMinifyEnabled = true
             isShrinkResources = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+        }
+        // `./gradlew assemblePreview`: the sample-data version, but optimised like the real app so
+        // scrolling and animations are as smooth as they'll really be. Installs next to the real app.
+        create("preview") {
+            initWith(getByName("release"))
+            signingConfig = signingConfigs.getByName("debug")
+            applicationIdSuffix = ".preview"
+            matchingFallbacks += "release"
+            buildConfigField("Boolean", "DEMO", "true")
+            buildConfigField("String", "SUPABASE_URL", "\"\"")
+            buildConfigField("String", "SUPABASE_ANON_KEY", "\"\"")
         }
     }
     compileOptions {

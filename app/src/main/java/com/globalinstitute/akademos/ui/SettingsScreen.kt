@@ -1,5 +1,7 @@
 package com.globalinstitute.akademos.ui
 
+import kotlinx.coroutines.launch
+
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -46,9 +48,10 @@ fun SettingsScreen() {
     var remindAll by remember { mutableStateOf(Prefs.remindAllClasses) }
     var remindOn by remember { mutableStateOf(Prefs.remindersOn) }
     var confirmOut by remember { mutableStateOf(false) }
+    var moneyOn by remember { mutableStateOf(Prefs.moneyReminders) }
 
-    LazyColumn(contentPadding = PaddingValues(start = 20.dp, end = 20.dp, bottom = 40.dp)) {
-        item { Column(Modifier.padding(horizontal = 0.dp)) { ScreenHeader("Settings", "${s.me.fullName}  ·  ${s.me.role.replaceFirstChar { it.uppercase() }}", sidePadding = 0.dp) } }
+    LazyColumn(contentPadding = PaddingValues(start = 20.dp, end = 20.dp, bottom = LocalBarInset.current + 40.dp)) {
+        item { Column(Modifier.padding(horizontal = 0.dp)) { ScreenHeader("Settings", "${s.me.fullName}  ·  ${when (s.me.role) { "admin" -> "Administrator"; "teacher" -> "Teacher"; else -> "Student / parent" }}", sidePadding = 0.dp) } }
 
         item {
             SectionTitle("Look")
@@ -81,10 +84,23 @@ fun SettingsScreen() {
                     ToggleRow("Class reminders", "Full-screen alert when a class starts and ends", remindOn) {
                         remindOn = it; Prefs.remindersOn = it; ReminderScheduler.rearm(ctx)
                     }
+                    val scope = androidx.compose.runtime.rememberCoroutineScope()
+                    if (s.me.isAdmin) {
+                        Gap(12.dp)
+                        ToggleRow("Remind me for every class", "Off = only classes where you are the teacher", remindAll) {
+                            remindAll = it; Prefs.remindAllClasses = it
+                            s.school?.let { sc -> scope.launch { runCatching { ReminderScheduler.refresh(ctx, s.me, sc) } } }
+                        }
+                    }
                     Gap(12.dp)
-                    ToggleRow("Remind me for every class", "Off = only classes where you are the teacher", remindAll) {
-                        remindAll = it; Prefs.remindAllClasses = it
-                        s.school?.let { sc -> ReminderScheduler.sync(ctx, sc, s.me) }
+                    var checkIn by remember { mutableStateOf(Prefs.checkIn) }
+                    ToggleRow("3 PM class check-in", "Every day at 3 PM: are you teaching today, which class and when", checkIn) {
+                        checkIn = it; Prefs.checkIn = it; ReminderScheduler.rearm(ctx)
+                    }
+                    if (com.globalinstitute.akademos.data.Repo.demo) {
+                        Gap(12.dp)
+                        com.globalinstitute.akademos.ui.components.SecondaryButton("Preview the 3 PM check-in",
+                            { ReminderScheduler.sendCheckInTest(ctx) }, Modifier.fillMaxWidth())
                     }
                     Gap(16.dp)
                     var sent by remember { mutableStateOf(false) }
@@ -111,6 +127,38 @@ fun SettingsScreen() {
             }
         }
 
+        if (s.me.isAdmin || s.me.role == com.globalinstitute.akademos.data.Roles.PARENT) {
+            item {
+                val notifLauncher = androidx.activity.compose.rememberLauncherForActivityResult(
+                    androidx.activity.result.contract.ActivityResultContracts.RequestPermission()) { }
+                SectionTitle("Fees")
+                AkCard {
+                    ToggleRow(
+                        if (s.me.isAdmin) "Morning money reminder" else "Fee reminder",
+                        if (s.me.isAdmin) "At 9 AM: fees that are overdue" + if (com.globalinstitute.akademos.data.Features.SALARIES) " and salaries due to be paid" else ""
+                        else "Every morning from 3 days before it's due until it's paid, and evenings too once it's late",
+                        moneyOn,
+                    ) { moneyOn = it; Prefs.moneyReminders = it; ReminderScheduler.rearm(ctx) }
+                    if (android.os.Build.VERSION.SDK_INT >= 33 && androidx.core.content.ContextCompat.checkSelfPermission(ctx,
+                            android.Manifest.permission.POST_NOTIFICATIONS) != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+                        Gap(12.dp)
+                        com.globalinstitute.akademos.ui.components.SecondaryButton("Allow notifications",
+                            { notifLauncher.launch(android.Manifest.permission.POST_NOTIFICATIONS) }, Modifier.fillMaxWidth())
+                    }
+                    if (com.globalinstitute.akademos.data.Repo.demo) {
+                        Gap(12.dp)
+                        com.globalinstitute.akademos.ui.components.SecondaryButton("Preview the 9 AM reminder",
+                            { ReminderScheduler.sendMoneyTest(ctx) }, Modifier.fillMaxWidth())
+                        if (s.me.isAdmin) {
+                            Gap(8.dp)
+                            com.globalinstitute.akademos.ui.components.SecondaryButton("Preview an \"I've paid\"",
+                                { Prefs.seenClaims = emptySet(); ReminderScheduler.sendClaimsTest(ctx) }, Modifier.fillMaxWidth())
+                        }
+                    }
+                }
+            }
+        }
+
         item {
             Gap(24.dp)
             PrimaryButton("Sign out", { confirmOut = true }, Modifier.fillMaxWidth(), icon = Icons.Rounded.Logout,
@@ -122,7 +170,7 @@ fun SettingsScreen() {
         }
     }
 
-    if (confirmOut) AlertDialog(onDismissRequest = { confirmOut = false },
+    if (confirmOut) com.globalinstitute.akademos.ui.components.AkDialog(onDismissRequest = { confirmOut = false },
         title = { Text("Sign out?") },
         text = { Text("You will need your username and password to sign in again.") },
         confirmButton = { TextButton({ confirmOut = false; s.signOut() }) { Text("Sign out") } },

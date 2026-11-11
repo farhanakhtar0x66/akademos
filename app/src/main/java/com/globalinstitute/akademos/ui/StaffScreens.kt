@@ -124,13 +124,16 @@ fun TodayScreen(school: Load<School>) {
     var day by rememberSaveable { mutableIntStateOf(today.dayOfWeek.value) }
     var tick by remember { mutableIntStateOf(0) }
     val todays = rememberLoad(tick) { Repo.attendanceOn(today.toString()) }
+    val plans = rememberLoad(tick, s.nav.stack.size) {
+        runCatching { Repo.plans(today.toString(), today.plusDays(6).toString()) }.getOrDefault(com.globalinstitute.akademos.data.Plans.EMPTY)
+    }
     var now by remember { mutableStateOf(LocalTime.now()) }
     LaunchedEffect(Unit) { while (true) { delay(30_000); now = LocalTime.now() } }
     LifecycleEventEffect(Lifecycle.Event.ON_RESUME) { tick++; now = LocalTime.now() }
 
     val greeting = when (now.hour) { in 0..11 -> "Good morning"; in 12..16 -> "Good afternoon"; else -> "Good evening" }
 
-    LazyColumn(contentPadding = PaddingValues(bottom = 32.dp)) {
+    LazyColumn(contentPadding = PaddingValues(bottom = LocalBarInset.current + 32.dp)) {
         item {
             ScreenHeader("$greeting, ${s.me.fullName.substringBefore(' ')}",
                 eyebrow = today.format(DateTimeFormatter.ofPattern("EEEE · d MMMM")))
@@ -150,13 +153,24 @@ fun TodayScreen(school: Load<School>) {
             sc == null -> item { LoadingBlock() }
             else -> {
                 val isTodayView = day == today.dayOfWeek.value
-                val slots = sc.slots.filter { it.weekday == day }.sortedWith(compareBy(
+                val pl = plans.data ?: com.globalinstitute.akademos.data.Plans.EMPTY
+                if (isTodayView && plans.data != null) {
+                    item(key = "checkin") { CheckInCard(sc, pl, { tick++ }, Modifier.padding(horizontal = 20.dp, vertical = 8.dp)) }
+                    if (s.me.isAdmin) item(key = "teachers") { TeachersTodayCard(sc, pl, Modifier.padding(horizontal = 20.dp, vertical = 8.dp)) }
+                }
+                // The chosen weekday in the coming week, with every teacher's check-in applied.
+                val date = today.plusDays(((day - today.dayOfWeek.value + 7) % 7).toLong())
+                val slots = pl.sessions(sc, date).sortedWith(compareBy(
                     { isTodayView && !now.isBefore(LocalTime.parse(it.endTime)) }, { it.startTime }))
                 if (slots.isEmpty()) item {
-                    EmptyBlock(Icons.Rounded.EventBusy, "No classes", if (s.me.isAdmin) "Add batches and their timings in Admin → Batches & timetable." else "There are no classes on this day.")
+                    EmptyBlock(Icons.Rounded.EventBusy, "No classes", when {
+                        sc.batches.isEmpty() && s.me.isAdmin -> "Add batches and their timings in Admin → Batches & timetable."
+                        sc.batches.isEmpty() -> "The administrator hasn't given you any batches yet."
+                        else -> "There are no classes on this day."
+                    })
                 }
                 val isToday = day == today.dayOfWeek.value
-                items(slots, key = { it.id ?: it.hashCode().toString() }) { slot ->
+                items(slots, key = { it.key }) { slot ->
                     SlotCard(sc, slot, isToday, now, todays.data.orEmpty().filter { it.batchId == slot.batchId },
                         Modifier.padding(horizontal = 20.dp, vertical = 8.dp).animateItem())
                 }
@@ -166,7 +180,7 @@ fun TodayScreen(school: Load<School>) {
 }
 
 @Composable
-private fun SlotCard(sc: School, slot: Slot, isToday: Boolean, now: LocalTime, records: List<Attendance>, modifier: Modifier) {
+private fun SlotCard(sc: School, slot: com.globalinstitute.akademos.data.Session, isToday: Boolean, now: LocalTime, records: List<Attendance>, modifier: Modifier) {
     val s = LocalSession.current
     val st = LocalStatus.current
     val batch = sc.batch(slot.batchId) ?: return
@@ -181,7 +195,8 @@ private fun SlotCard(sc: School, slot: Slot, isToday: Boolean, now: LocalTime, r
     val date = LocalDate.now().toString()
 
     val subjInName = subject != null && batch.name.contains(subject.name, ignoreCase = true)
-    val who = listOfNotNull(subject?.name?.takeUnless { subjInName }, sc.person(batch.teacherId)?.fullName).joinToString("  ·  ")
+    val who = listOfNotNull(subject?.name?.takeUnless { subjInName }, sc.person(slot.teacherId ?: batch.teacherId)?.fullName,
+        "changed for today".takeIf { slot.changed }).joinToString("  ·  ")
     val clock = java.time.format.DateTimeFormatter.ofPattern("h:mm")
     val ampm = java.time.format.DateTimeFormatter.ofPattern("a")
 
@@ -236,8 +251,8 @@ private fun SlotCard(sc: School, slot: Slot, isToday: Boolean, now: LocalTime, r
                     Modifier.fillMaxWidth(), icon = Icons.Rounded.TaskAlt)
             } else {
                 Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    SecondaryButton("Edit", { s.nav.push(Screen.Attendance(batch.id!!, date, AttMode.ARRIVAL)) }, Modifier.weight(1f), icon = Icons.Rounded.TaskAlt)
-                    SecondaryButton("Mark leaving", { s.nav.push(Screen.Attendance(batch.id!!, date, AttMode.DEPARTURE)) }, Modifier.weight(1f), icon = Icons.Rounded.Logout)
+                    SecondaryButton("Edit", { s.nav.push(Screen.Attendance(batch.id!!, date, AttMode.ARRIVAL)) }, Modifier.weight(1f))
+                    SecondaryButton("Mark leaving", { s.nav.push(Screen.Attendance(batch.id!!, date, AttMode.DEPARTURE)) }, Modifier.weight(1f))
                 }
             }
         }
@@ -315,6 +330,7 @@ private class AttData(val students: List<Student>, val records: List<Attendance>
 @Composable
 fun AttendanceScreen(screen: Screen.Attendance) {
     val s = LocalSession.current
+    val haptic = androidx.compose.ui.platform.LocalHapticFeedback.current
     val ctx = LocalContext.current
     val st = LocalStatus.current
     val scope = rememberCoroutineScope()
@@ -469,6 +485,7 @@ fun AttendanceScreen(screen: Screen.Attendance) {
                                                 }
                                             }
                                         }.onSuccess {
+                                            haptic.performHapticFeedback(androidx.compose.ui.hapticfeedback.HapticFeedbackType.Confirm)
                                             saved = true; delay(900); s.nav.pop()
                                         }.onFailure { error = it.friendly() }
                                         saving = false

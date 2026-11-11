@@ -9,3 +9,7 @@ local.properties
 captures/
 *.apk
 .DS_Store
+pgdata/
+
+# The institute's real students, fees and timetable: run in Supabase, never publish
+supabase/004_global_institute_data.sql

@@ -1,6 +1,6 @@
 # Akademos
 
-**The Global Institute app.** Teachers take attendance in a few taps, and parents see their child's attendance, marks and answer sheets.
+**The Global Institute app.** Teachers take attendance in a few taps, and students and parents see attendance, marks, answer sheets and fees.
 
 <p>
   <img src="docs/screenshots/today.jpg" width="200" alt="Today's classes, with the current class highlighted in marigold">
@@ -44,16 +44,22 @@ Each access key works **once**, for **one person**, and stops working after a fe
 
 ## What you can do
 
-| | Parents | Teachers | Administrator |
+| | Students & parents | Teachers | Administrator |
 |---|:---:|:---:|:---:|
-| See your child's attendance, marks and answer sheets | ✓ | | |
-| Take attendance and mark who leaves | | ✓ | ✓ |
-| Enter marks and photograph answer sheets | | ✓ | ✓ |
+| See attendance, marks and answer sheets | ✓ (own child) | ✓ (own batches) | ✓ |
+| Take attendance and mark who leaves | | ✓ (own batches) | ✓ |
+| Enter marks and photograph answer sheets | | ✓ (own batches) | ✓ |
+| 3 PM check-in: confirm or change today's classes | | ✓ | ✓ |
 | Get a full-screen reminder when class starts and ends | | ✓ | ✓ |
 | Add students, classes, subjects and the timetable | | | ✓ |
-| Invite teachers and parents, block access | | | ✓ |
+| Daily fee reminder until paid; tell the office "I've paid" | ✓ | | |
+| Invite, block or remove anyone | | | ✓ |
+| Record fees, confirm "I've paid", see who hasn't paid | | | ✓ |
+| See how many classes each teacher took and what to pay them | | | ✓ |
 
 ## For teachers: make sure reminders work
+
+Every day at **3 PM** the app asks if you're teaching today. Tap **Yes, as usual**, **No class today**, or **Change** to pick your classes and times just for today. The class reminders follow your answer.
 
 The app wakes your phone with a full-screen alert when a class starts, when it ends, and 15 minutes after attendance if anyone was absent.
 
@@ -72,10 +78,12 @@ When the institute announces a new version, download and install it the same way
 
 ## Privacy and security
 
-- Parents can only ever see **their own child**. This is enforced by the institute's database, not just the app.
+- Students and parents can only ever see **their own child**. Teachers only see the students and subjects they teach. This is enforced by the institute's database, not just the app.
+- A fee only counts as paid when the administrator confirms it.
 - Only teachers and the administrator can change attendance or marks, and every change is recorded with who made it.
 - Teacher accounts lock behind your fingerprint or phone PIN.
 - Answer sheets are stored privately and can only be opened by staff and that child's parents.
+- Fees and teachers' pay are visible only to the administrator. A parent sees only their own child's fee, and teachers see no money information at all.
 
 ---
 

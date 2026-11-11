@@ -33,7 +33,7 @@ object Repo {
     private const val SHEETS = "answer-sheets"
     private lateinit var client: SupabaseClient
     /** Debug builds without server keys run on sample data. */
-    val demo get() = BuildConfig.DEBUG && !isConfigured
+    val demo get() = BuildConfig.DEMO || (BuildConfig.DEBUG && !isConfigured)
 
     val isConfigured get() = BuildConfig.SUPABASE_URL.startsWith("https://") && !BuildConfig.SUPABASE_URL.contains("YOUR-PROJECT")
 
@@ -224,11 +224,13 @@ object Repo {
         }.decodeList<MarkWithTest>().sortedByDescending { it.assessments?.heldOn ?: "" }
 
     // ------------------------------------------------------------- admin
-    suspend fun createInvite(role: String, label: String, studentIds: List<String>, hours: Int): String = if (demo) Demo.createInvite(role, label, studentIds, hours) else
+    suspend fun createInvite(role: String, label: String, studentIds: List<String>, hours: Int, batchIds: List<String> = emptyList()): String =
+        if (demo) Demo.createInvite(role, label, studentIds, hours, batchIds) else
         client.postgrest.rpc("create_invite", buildJsonObject {
             put("p_role", role); put("p_label", label)
             put("p_student_ids", JsonArray(studentIds.map { JsonPrimitive(it) }))
             put("p_valid_hours", hours)
+            put("p_batch_ids", JsonArray(batchIds.map { JsonPrimitive(it) }))
         }).decodeAs()
 
     suspend fun invites(): List<Invite> = if (demo) Demo.invites() else
@@ -250,6 +252,107 @@ object Repo {
             order("at", Order.DESCENDING); limit(100)
         }.decodeList()
 
+    // ------------------------------------------------------------- money (admin; parents read their own child)
+    suspend fun studentFees(): List<StudentFee> = if (demo) Demo.studentFees() else
+        client.from("student_fees").select().decodeList()
+
+    suspend fun saveStudentFee(f: StudentFee) { if (demo) return Demo.saveStudentFee(f)
+        client.from("student_fees").upsert(f) { onConflict = "student_id" }
+    }
+
+    /** Fee payments for months from [fromMonth] (yyyy-MM-01) onwards. */
+    suspend fun feePayments(fromMonth: String): List<FeePayment> = if (demo) Demo.feePayments(fromMonth) else
+        client.from("fee_payments").select { filter { gte("for_month", fromMonth) }; order("paid_on", Order.DESCENDING) }.decodeList()
+
+    suspend fun studentFeePayments(studentId: String): List<FeePayment> = if (demo) Demo.studentFeePayments(studentId) else
+        client.from("fee_payments").select { filter { eq("student_id", studentId) }; order("for_month", Order.DESCENDING); order("paid_on", Order.DESCENDING) }.decodeList()
+
+    suspend fun addFeePayment(p: FeePayment) { if (demo) return Demo.addFeePayment(p)
+        client.from("fee_payments").insert(p.copy(id = null))
+    }
+
+    suspend fun deleteFeePayment(id: String) { if (demo) return Demo.deleteFeePayment(id)
+        client.from("fee_payments").delete { filter { eq("id", id) } }
+    }
+
+    suspend fun payees(): List<Payee> = if (demo) Demo.payees() else
+        client.from("payees").select { order("name", Order.ASCENDING) }.decodeList()
+
+    suspend fun savePayee(p: Payee) { if (demo) return Demo.savePayee(p)
+        if (p.id == null) client.from("payees").insert(p) else client.from("payees").update(p) { filter { eq("id", p.id) } }
+    }
+
+    suspend fun salaryPayments(fromMonth: String): List<SalaryPayment> = if (demo) Demo.salaryPayments(fromMonth) else
+        client.from("salary_payments").select { filter { gte("for_month", fromMonth) }; order("paid_on", Order.DESCENDING) }.decodeList()
+
+    suspend fun addSalaryPayment(p: SalaryPayment) { if (demo) return Demo.addSalaryPayment(p)
+        client.from("salary_payments").insert(p.copy(id = null))
+    }
+
+    suspend fun deleteSalaryPayment(id: String) { if (demo) return Demo.deleteSalaryPayment(id)
+        client.from("salary_payments").delete { filter { eq("id", id) } }
+    }
+
+    // ------------------------------------------------------------- daily check-in
+    /** Check-ins and day-only classes from [from] to [to] (inclusive). Teachers only get their own back. */
+    suspend fun plans(from: String, to: String): Plans = if (demo) Demo.plans(from, to) else Plans(
+        client.from("day_plans").select { filter { gte("date", from); lte("date", to) } }.decodeList(),
+        client.from("day_classes").select { filter { gte("date", from); lte("date", to) }; order("start_time", Order.ASCENDING) }.decodeList(),
+    )
+
+    /** Save what I'm teaching on [date]: as usual, my own list, or nothing. */
+    suspend fun savePlan(date: String, mode: String, classes: List<DayClass>) { if (demo) return Demo.savePlan(date, mode, classes)
+        val me = uid() ?: error("Please sign in again")
+        client.from("day_classes").delete { filter { eq("teacher_id", me); eq("date", date) } }
+        client.from("day_plans").upsert(DayPlan(me, date, mode)) { onConflict = "teacher_id,date" }
+        if (mode == PlanMode.CUSTOM && classes.isNotEmpty())
+            client.from("day_classes").insert(classes.map { it.copy(id = null, teacherId = me, date = date) })
+    }
+
+    // ------------------------------------------------------------- "I've paid"
+    suspend fun feeClaims(studentId: String? = null): List<FeeClaim> = if (demo) Demo.feeClaims(studentId) else
+        client.from("fee_claims").select {
+            if (studentId != null) filter { eq("student_id", studentId) }
+            order("created_at", Order.DESCENDING); limit(200)
+        }.decodeList()
+
+    suspend fun pendingClaims(): List<FeeClaim> = feeClaims().filter { it.status == ClaimStatus.PENDING }
+
+    suspend fun addFeeClaim(c: FeeClaim) { if (demo) return Demo.addFeeClaim(c)
+        client.from("fee_claims").insert(buildJsonObject {
+            put("student_id", c.studentId); put("for_month", c.forMonth); put("amount", c.amount); put("method", c.method)
+            c.note?.trim()?.ifBlank { null }?.let { put("note", it) }
+        })
+    }
+
+    suspend fun confirmClaim(id: String, amount: Double? = null) { if (demo) return Demo.confirmClaim(id, amount)
+        client.postgrest.rpc("confirm_fee_claim", buildJsonObject { put("p_id", id); amount?.let { put("p_amount", it) } })
+    }
+
+    suspend fun rejectClaim(id: String) { if (demo) return Demo.rejectClaim(id)
+        client.postgrest.rpc("reject_fee_claim", buildJsonObject { put("p_id", id) })
+    }
+
+    // ------------------------------------------------------------- teachers' classes and pay
+    suspend fun classesTaken(from: String, to: String): List<ClassTaken> = if (demo) Demo.classesTaken(from, to) else
+        client.postgrest.rpc("classes_taken", buildJsonObject { put("p_from", from); put("p_to", to) }).decodeList()
+
+    suspend fun teacherRates(): List<TeacherRate> = if (demo) Demo.teacherRates() else
+        client.from("teacher_rates").select().decodeList()
+
+    suspend fun saveRate(r: TeacherRate) { if (demo) return Demo.saveRate(r)
+        client.from("teacher_rates").upsert(r) { onConflict = "teacher_id" }
+    }
+
+    // ------------------------------------------------------------- removing
+    suspend fun removeUser(userId: String) { if (demo) return Demo.removeUser(userId)
+        client.postgrest.rpc("remove_user", buildJsonObject { put("p_user", userId) })
+    }
+
+    suspend fun deleteStudent(id: String) { if (demo) return Demo.deleteStudent(id)
+        client.from("students").delete { filter { eq("id", id) } }
+    }
+
     @Suppress("unused") private fun JsonObject.debug() = toString()
 }
 
@@ -265,6 +368,10 @@ fun Throwable.friendly(): String {
         "row-level security" in m || "42501" in m || "not allowed" in m || "permission" in m ->
             "You don't have permission to do this."
         "more than the maximum" in m -> "A score is higher than the maximum marks."
+        "pgrst205" in m || "could not find the table" in m || "pgrst202" in m || "could not find the function" in m ->
+            "The server needs this version's update. Run the files in the supabase folder (002, then 003) in Supabase."
+        "already handled" in m -> "Someone already handled this."
+        "fee_claims_one_open" in m -> "You've already told the office about this month's payment."
         "duplicate key" in m -> "This already exists."
         else -> message?.lineSequence()?.firstOrNull()?.take(140) ?: "Something went wrong."
     }

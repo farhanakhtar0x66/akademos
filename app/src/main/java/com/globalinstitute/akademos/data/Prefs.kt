@@ -37,6 +37,23 @@ object Prefs {
         get() = sp.getBoolean("reminders_on", true)
         set(v) = sp.edit().putBoolean("reminders_on", v).apply()
 
+    var moneyReminders: Boolean
+        get() = sp.getBoolean("money_reminders", true)
+        set(v) = sp.edit().putBoolean("money_reminders", v).apply()
+
+    var checkIn: Boolean
+        get() = sp.getBoolean("checkin", true)
+        set(v) = sp.edit().putBoolean("checkin", v).apply()
+
+    var hasOwnClasses: Boolean
+        get() = sp.getBoolean("own_classes", false)
+        set(v) = sp.edit().putBoolean("own_classes", v).apply()
+
+    /** "I've paid" messages the administrator was already told about. */
+    var seenClaims: Set<String>
+        get() = sp.getStringSet("seen_claims", emptySet()) ?: emptySet()
+        set(v) = sp.edit().putStringSet("seen_claims", v).apply()
+
     var lastRole: String?
         get() = sp.getString("last_role", null)
         set(v) = sp.edit().putString("last_role", v).apply()

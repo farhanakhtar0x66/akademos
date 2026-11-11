@@ -26,6 +26,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Groups
+import androidx.compose.material.icons.rounded.CurrencyRupee
 import androidx.compose.material.icons.rounded.Quiz
 import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material.icons.rounded.Visibility
@@ -82,9 +83,9 @@ fun ParentChildScreen() {
     val list = kids.data.orEmpty()
     val child = list.firstOrNull { it.id == selected } ?: list.firstOrNull()
 
-    LazyColumn(contentPadding = PaddingValues(bottom = 32.dp)) {
+    LazyColumn(contentPadding = PaddingValues(bottom = LocalBarInset.current + 32.dp)) {
         item {
-            ScreenHeader("Namaste, ${s.me.fullName.substringBefore(' ')}", "Your child's progress at Global Institute")
+            ScreenHeader("Namaste, ${s.me.fullName.substringBefore(' ')}", "Attendance, marks and fees at Global Institute")
         }
         when {
             kids.data == null && kids.error != null -> item { Box(Modifier.padding(20.dp)) { ErrorBlock(kids.error, kids.reload) } }
@@ -96,7 +97,11 @@ fun ParentChildScreen() {
                         items(list, key = { it.id!! }) { k -> Chip(k.id == child?.id, k.fullName.substringBefore(' '), { selected = k.id }) }
                     }
                 }
-                child?.let { report(it, s.school) }
+                child?.let { c ->
+                    item(key = "fee-${c.id}") { Box(Modifier.padding(horizontal = 20.dp)) { ParentFeeCard(c.id!!, c.fullName) } }
+                    item(key = "gap-${c.id}") { Gap(12.dp) }
+                    report(c, s.school)
+                }
             }
         }
     }
@@ -109,7 +114,7 @@ fun StudentsTab() {
     val students = rememberLoad(Unit) { Repo.students() }
     var q by remember { mutableStateOf("") }
     val sc = s.school
-    LazyColumn(contentPadding = PaddingValues(bottom = 32.dp)) {
+    LazyColumn(contentPadding = PaddingValues(bottom = LocalBarInset.current + 32.dp)) {
         item {
             ScreenHeader("Students", "Tap a student to see their attendance and marks")
             BigField(q, { q = it }, "Search by name or roll no.", Modifier.padding(horizontal = 20.dp), leading = Icons.Rounded.Search)
@@ -151,7 +156,11 @@ fun StudentDetailScreen(studentId: String) {
     val s = LocalSession.current
     val stu = rememberLoad(studentId) { Repo.students(includeInactive = true).firstOrNull { it.id == studentId } }
     LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 32.dp)) {
-        item { ScreenHeader(stu.data?.fullName ?: "Student", s.school?.klass(stu.data?.classId)?.name, onBack = { s.nav.pop() }) }
+        item {
+            ScreenHeader(stu.data?.fullName ?: "Student", s.school?.klass(stu.data?.classId)?.name, onBack = { s.nav.pop() }, actions = {
+                if (s.me.isAdmin) SecondaryButton("Fees", { s.nav.push(Screen.StudentFees(studentId)) }, icon = Icons.Rounded.CurrencyRupee)
+            })
+        }
         stu.data?.let { report(it, s.school) } ?: item { LoadingBlock() }
     }
 }
@@ -291,7 +300,7 @@ private fun Legend(label: String, c: Color) {
 @Composable
 private fun Ring(fraction: Float, color: Color) {
     val anim = remember { Animatable(0f) }
-    LaunchedEffect(fraction) { anim.animateTo(fraction, tween(1100, easing = FastOutSlowInEasing)) }
+    LaunchedEffect(fraction) { anim.animateTo(fraction, com.globalinstitute.akademos.ui.components.Motion.spring(1f, 0.9f)) }
     val track = MaterialTheme.colorScheme.surfaceVariant
     Box(Modifier.size(104.dp), contentAlignment = Alignment.Center) {
         Canvas(Modifier.fillMaxSize()) {
@@ -309,7 +318,7 @@ private fun Ring(fraction: Float, color: Color) {
 private fun Bar(fraction: Float, color: Color) {
     var go by remember { mutableStateOf(false) }
     LaunchedEffect(Unit) { go = true }
-    val f by animateFloatAsState(if (go) fraction.coerceIn(0f, 1f) else 0f, tween(900, easing = FastOutSlowInEasing), label = "bar")
+    val f by animateFloatAsState(if (go) fraction.coerceIn(0f, 1f) else 0f, com.globalinstitute.akademos.ui.components.Motion.spring(1f, 0.8f), label = "bar")
     Box(Modifier.fillMaxWidth().height(14.dp).clip(RoundedCornerShape(7.dp)).background(MaterialTheme.colorScheme.surfaceVariant)) {
         Box(Modifier.fillMaxWidth(f).height(14.dp).clip(RoundedCornerShape(7.dp)).background(color))
     }

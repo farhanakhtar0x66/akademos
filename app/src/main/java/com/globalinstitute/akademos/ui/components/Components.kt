@@ -1,5 +1,7 @@
 package com.globalinstitute.akademos.ui.components
 
+import androidx.compose.animation.togetherWith
+
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.Spring
@@ -88,8 +90,8 @@ import java.time.format.DateTimeFormatter
 import kotlin.math.abs
 
 // ---------------------------------------------------------------- motion
-val Bouncy = spring<Float>(dampingRatio = Spring.DampingRatioMediumBouncy, stiffness = Spring.StiffnessMediumLow)
-val Smooth = spring<Float>(dampingRatio = Spring.DampingRatioNoBouncy, stiffness = Spring.StiffnessMediumLow)
+val Bouncy = Motion.Pop
+val Smooth = Motion.Default
 
 /**
  * The Akademos mark: a tick that rises into a raised hand — "Present!" — on jamun.
@@ -152,20 +154,19 @@ fun AkCard(
     content: @Composable ColumnScope.() -> Unit,
 ) {
     val src = remember { MutableInteractionSource() }
-    val pressed by src.collectIsPressedAsState()
-    val scale by animateFloatAsState(if (pressed) 0.97f else 1f, Bouncy, label = "card")
     Surface(
-        modifier = modifier.fillMaxWidth().scale(scale)
-            .then(if (onClick != null) Modifier.clip(MaterialTheme.shapes.large).clickable(src, null, onClick = onClick) else Modifier),
+        modifier = modifier.fillMaxWidth().pressScale(0.97f, enabled = onClick != null)
+            .then(if (onClick != null) Modifier.clip(MaterialTheme.shapes.large).clickable(src, androidx.compose.material3.ripple(), onClick = onClick) else Modifier),
         shape = MaterialTheme.shapes.large,
         color = color,
         shadowElevation = 0.dp,
         border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
     ) {
-        Row(Modifier.height(androidx.compose.foundation.layout.IntrinsicSize.Min)) {
-            if (accent != null) Box(Modifier.padding(start = 14.dp, top = 18.dp, bottom = 18.dp).width(5.dp).fillMaxHeight().clip(CircleShape).background(accent))
+        // Intrinsic measuring (measuring the text twice) only when the coloured stripe needs the card's height.
+        if (accent != null) Row(Modifier.height(androidx.compose.foundation.layout.IntrinsicSize.Min)) {
+            Box(Modifier.padding(start = 14.dp, top = 18.dp, bottom = 18.dp).width(5.dp).fillMaxHeight().clip(CircleShape).background(accent))
             Column(Modifier.weight(1f).padding(contentPadding), content = content)
-        }
+        } else Column(Modifier.padding(contentPadding), content = content)
     }
 }
 
@@ -180,37 +181,88 @@ fun PrimaryButton(
     color: Color = MaterialTheme.colorScheme.primary,
     contentColor: Color = MaterialTheme.colorScheme.onPrimary,
 ) {
-    val haptic = LocalHapticFeedback.current
     val src = remember { MutableInteractionSource() }
-    val pressed by src.collectIsPressedAsState()
-    val scale by animateFloatAsState(if (pressed) 0.96f else 1f, Bouncy, label = "btn")
+    val compact = LocalCompactButtons.current
     Button(
-        onClick = { haptic.performHapticFeedback(HapticFeedbackType.LongPress); onClick() },
-        modifier = modifier.heightIn(min = 60.dp).scale(scale),
+        onClick = onClick,
+        modifier = modifier.heightIn(min = if (compact) ButtonMetrics.CompactHeight else ButtonMetrics.Height).pressScale(0.96f, enabled = enabled && !loading),
         enabled = enabled && !loading,
         interactionSource = src,
-        shape = RoundedCornerShape(20.dp),
+        shape = if (compact) ButtonMetrics.CompactShape else ButtonMetrics.Shape,
         colors = ButtonDefaults.buttonColors(containerColor = color, contentColor = contentColor),
-        contentPadding = PaddingValues(horizontal = 24.dp, vertical = 14.dp),
+        contentPadding = ButtonMetrics.padding(compact),
     ) {
-        if (loading) CircularProgressIndicator(Modifier.size(24.dp), color = contentColor, strokeWidth = 3.dp)
-        else {
-            if (icon != null) { Icon(icon, null, Modifier.size(26.dp)); Spacer(Modifier.width(10.dp)) }
-            Text(text, style = MaterialTheme.typography.titleMedium)
+        androidx.compose.animation.AnimatedContent(loading, transitionSpec = {
+            (fadeIn(Motion.PageFade) + scaleIn(Motion.Default, initialScale = 0.8f)) togetherWith (fadeOut(Motion.PageFade) + scaleOut(Motion.Default, targetScale = 0.8f))
+        }, label = "btn") { busy ->
+            if (busy) CircularProgressIndicator(Modifier.size(24.dp), color = contentColor, strokeWidth = 3.dp)
+            else ButtonLabel(text, icon)
         }
     }
 }
 
 @Composable
 fun SecondaryButton(text: String, onClick: () -> Unit, modifier: Modifier = Modifier, icon: ImageVector? = null, enabled: Boolean = true) {
+    val compact = LocalCompactButtons.current
     FilledTonalButton(
-        onClick = onClick, modifier = modifier.heightIn(min = 56.dp), enabled = enabled,
-        shape = RoundedCornerShape(18.dp), contentPadding = PaddingValues(horizontal = 20.dp, vertical = 12.dp),
+        onClick = onClick, modifier = modifier.heightIn(min = if (compact) ButtonMetrics.CompactHeight else ButtonMetrics.Height).pressScale(0.96f, enabled), enabled = enabled,
+        shape = if (compact) ButtonMetrics.CompactShape else ButtonMetrics.Shape, contentPadding = ButtonMetrics.padding(compact),
         colors = ButtonDefaults.filledTonalButtonColors(
             containerColor = MaterialTheme.colorScheme.primaryContainer, contentColor = MaterialTheme.colorScheme.onPrimaryContainer),
-    ) {
-        if (icon != null) { Icon(icon, null, Modifier.size(24.dp)); Spacer(Modifier.width(8.dp)) }
-        Text(text, style = MaterialTheme.typography.labelLarge)
+    ) { ButtonLabel(text, icon) }
+}
+
+/**
+ * Every button in the app shares one height, corner, padding, icon size and type style, so
+ * buttons that sit side by side always line up. Labels are centred, even when they wrap.
+ */
+object ButtonMetrics {
+    val Height = 56.dp
+    val CompactHeight = 48.dp
+    val Shape = RoundedCornerShape(18.dp)
+    val CompactShape = RoundedCornerShape(16.dp)
+    fun padding(compact: Boolean) = if (compact) PaddingValues(horizontal = 18.dp, vertical = 8.dp) else PaddingValues(horizontal = 18.dp, vertical = 10.dp)
+}
+
+/** Dialogs use the smaller button size. */
+val LocalCompactButtons = androidx.compose.runtime.compositionLocalOf { false }
+
+@Composable
+private fun ButtonLabel(text: String, icon: ImageVector?) {
+    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.Center) {
+        if (icon != null) { Icon(icon, null, Modifier.size(22.dp)); Spacer(Modifier.width(8.dp)) }
+        Text(text, style = MaterialTheme.typography.labelLarge, textAlign = androidx.compose.ui.text.style.TextAlign.Center)
+    }
+}
+
+/**
+ * The app's dialog: same shape everywhere, buttons sized for a dialog, and a text "Cancel"
+ * that lines up with the filled button beside it.
+ */
+@Composable
+fun AkDialog(
+    onDismissRequest: () -> Unit,
+    confirmButton: @Composable () -> Unit,
+    dismissButton: (@Composable () -> Unit)? = null,
+    title: (@Composable () -> Unit)? = null,
+    text: (@Composable () -> Unit)? = null,
+) {
+    androidx.compose.material3.AlertDialog(
+        onDismissRequest = onDismissRequest,
+        confirmButton = { androidx.compose.runtime.CompositionLocalProvider(LocalCompactButtons provides true) { confirmButton() } },
+        dismissButton = dismissButton?.let { d -> { androidx.compose.runtime.CompositionLocalProvider(LocalCompactButtons provides true) { d() } } },
+        title = title, text = text,
+        shape = RoundedCornerShape(28.dp),
+        // same surface as text fields, so a field's label never sits on a mismatched patch
+        containerColor = MaterialTheme.colorScheme.surface,
+    )
+}
+
+/** A quiet text button for dialogs (Cancel, Keep), the same height as the filled one beside it. */
+@Composable
+fun DialogTextButton(text: String, onClick: () -> Unit, color: Color = MaterialTheme.colorScheme.primary) {
+    androidx.compose.material3.TextButton(onClick, Modifier.heightIn(min = ButtonMetrics.CompactHeight), shape = ButtonMetrics.CompactShape) {
+        Text(text, style = MaterialTheme.typography.labelLarge, color = color)
     }
 }
 
@@ -349,22 +401,21 @@ fun StudentTile(
         Status.LATE -> s.late
         else -> MaterialTheme.colorScheme.outlineVariant
     }
-    val bg by animateColorAsState(target, androidx.compose.animation.core.tween(220), label = "bg")
-    val border by animateColorAsState(edge, androidx.compose.animation.core.tween(220), label = "edge")
+    val bg by animateColorAsState(target, Motion.spring(1f, 0.22f), label = "bg")
+    val border by animateColorAsState(edge, Motion.spring(1f, 0.22f), label = "edge")
     var bump by remember { mutableIntStateOf(0) }
     val pop by animateFloatAsState(if (bump % 2 == 1) 1.04f else 1f, Bouncy, label = "pop", finishedListener = { if (bump % 2 == 1) bump++ })
     val src = remember { MutableInteractionSource() }
-    val pressed by src.collectIsPressedAsState()
-    val press by animateFloatAsState(if (pressed) 0.95f else 1f, Bouncy, label = "press")
 
     Box(
         modifier
-            .scale(pop * press)
+            .pressScale(0.95f)
+            .scale(pop)
             .clip(RoundedCornerShape(22.dp))
             .background(bg)
             .border(2.dp, border, RoundedCornerShape(22.dp))
             .clickable(src, null) {
-                haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                haptic.performHapticFeedback(HapticFeedbackType.SegmentTick)
                 bump = if (bump % 2 == 0) bump + 1 else bump + 2
                 onClick()
             }
@@ -413,13 +464,16 @@ fun SectionTitle(text: String, modifier: Modifier = Modifier) {
 
 @Composable
 fun Chip(selected: Boolean, text: String, onClick: () -> Unit, color: Color = MaterialTheme.colorScheme.primary) {
-    val bg by animateColorAsState(if (selected) color else MaterialTheme.colorScheme.surface, label = "chip")
+    val haptic = LocalHapticFeedback.current
+    val bg by animateColorAsState(if (selected) color else MaterialTheme.colorScheme.surface, Motion.spring(1f, 0.25f), label = "chip")
     val onSel = if (color.luminance() > 0.45f) Color(0xFF0B1B33) else Color.White
-    val fg by animateColorAsState(if (selected) onSel else MaterialTheme.colorScheme.onSurface, label = "chipfg")
+    val fg by animateColorAsState(if (selected) onSel else MaterialTheme.colorScheme.onSurface, Motion.spring(1f, 0.25f), label = "chipfg")
+    val edge by animateColorAsState(if (selected) color else MaterialTheme.colorScheme.outline, Motion.spring(1f, 0.25f), label = "chipedge")
     Box(
-        Modifier.clip(CircleShape).background(bg)
-            .border(1.5.dp, if (selected) color else MaterialTheme.colorScheme.outline, CircleShape)
-            .clickable(onClick = onClick).padding(horizontal = 18.dp, vertical = 12.dp),
+        Modifier.pressScale(0.94f).clip(CircleShape).background(bg)
+            .border(1.5.dp, edge, CircleShape)
+            .clickable { if (!selected) haptic.performHapticFeedback(HapticFeedbackType.SegmentTick); onClick() }
+            .padding(horizontal = 18.dp, vertical = 12.dp),
     ) { Text(text, color = fg, style = MaterialTheme.typography.labelLarge) }
 }
 

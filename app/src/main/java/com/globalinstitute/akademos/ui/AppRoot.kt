@@ -1,5 +1,19 @@
 package com.globalinstitute.akademos.ui
 
+import com.globalinstitute.akademos.ui.components.rememberReduceMotion
+
+import com.globalinstitute.akademos.ui.components.LocalReduceMotion
+
+import com.globalinstitute.akademos.ui.components.Motion
+
+import androidx.compose.animation.ExitTransition
+
+import androidx.compose.animation.EnterTransition
+
+import androidx.compose.ui.graphics.graphicsLayer
+
+import androidx.compose.ui.layout.onSizeChanged
+
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.ContentTransform
@@ -110,12 +124,24 @@ sealed interface Screen {
     data object Keys : Screen
     data object People : Screen
     data object Audit : Screen
+    data object Fees : Screen
+    data class StudentFees(val studentId: String) : Screen
+    data object Salaries : Screen
+    data object Earnings : Screen
+    data class PlanDay(val date: String) : Screen
+    data object TeacherPay : Screen
 }
 
 class Nav {
     val stack = mutableStateListOf<Screen>(Screen.Home)
     var forward by mutableStateOf(true)
+    /** The bottom tab that was open, so Back returns to it. */
+    var tab by mutableStateOf<String?>(null)
+    /** A fee reminder's "Yes, I've paid" was tapped for this student. */
+    var claimFor by mutableStateOf<String?>(null)
     val top get() = stack.last()
+    /** Set after a back swipe finishes: the swipe already moved the page, so skip the pop animation. */
+    var instant by mutableStateOf(false)
     fun push(s: Screen) { forward = true; stack.add(s) }
     fun pop() { if (stack.size > 1) { forward = false; stack.removeAt(stack.lastIndex) } }
     fun home() { forward = false; while (stack.size > 1) stack.removeAt(stack.lastIndex) }
@@ -132,11 +158,29 @@ class SessionCtx(
 
 val LocalSession = compositionLocalOf<SessionCtx> { error("no session") }
 
-private val pageIn: (Boolean) -> ContentTransform = { fwd ->
-    val dir = if (fwd) 1 else -1
-    (slideInHorizontally(tween(340)) { it / 4 * dir } + fadeIn(tween(260)) + scaleIn(tween(340), initialScale = 0.98f))
-        .togetherWith(slideOutHorizontally(tween(340)) { -it / 6 * dir } + fadeOut(tween(200)))
+/**
+ * Pages enter and leave along the same path: a new page slides in from the right over the old
+ * one (which drifts left and dims), and Back sends it out to the right again. Springs, so a
+ * transition can be interrupted at any point. With "Remove animations" on, a plain cross-fade.
+ */
+private fun pageTransition(fwd: Boolean, depth: Int, reduce: Boolean): ContentTransform {
+    if (reduce) return (fadeIn(Motion.PageFade) togetherWith fadeOut(Motion.PageFade)).apply { targetContentZIndex = depth.toFloat() }
+    val t = if (fwd)
+        slideInHorizontally(Motion.Page) { it } togetherWith
+            (slideOutHorizontally(Motion.Page) { -it * 3 / 10 } + fadeOut(Motion.PageFade, targetAlpha = 0.5f))
+    else
+        (slideInHorizontally(Motion.Page) { -it * 3 / 10 } + fadeIn(Motion.PageFade, initialAlpha = 0.5f)) togetherWith
+            slideOutHorizontally(Motion.Page) { it }
+    // The deeper page is always drawn on top, whichever way we're going.
+    return t.apply { targetContentZIndex = depth.toFloat() }
 }
+
+/** Tabs are siblings, not a journey: a quick cross-fade with the faintest lift, no sideways slide. */
+private fun tabTransition(): ContentTransform =
+    (fadeIn(Motion.spring(1f, 0.28f)) + scaleIn(Motion.spring(1f, 0.32f), initialScale = 0.985f)) togetherWith fadeOut(Motion.spring(1f, 0.18f))
+
+/** Height of the floating tab bar, so the tab screens can scroll their last item clear of it. */
+val LocalBarInset = androidx.compose.runtime.compositionLocalOf { 0.dp }
 
 // ===================================================================== root
 @Composable
@@ -149,7 +193,7 @@ fun AppRoot(activity: MainActivity) {
         is SessionStatus.Authenticated -> 2
         else -> 1
     }
-    AnimatedContent(stage, transitionSpec = { fadeIn(tween(400)) togetherWith fadeOut(tween(250)) }, label = "auth") { s ->
+    AnimatedContent(stage, transitionSpec = { fadeIn(Motion.spring(1f, 0.45f)) togetherWith fadeOut(Motion.spring(1f, 0.25f)) }, label = "auth") { s ->
         when (s) {
             0 -> Splash()
             1 -> AuthScreen()
@@ -167,6 +211,7 @@ private fun SignedIn(activity: MainActivity) {
     val signOut: () -> Unit = {
         scope.launch {
             ReminderScheduler.cancelAll(ctx)
+            ctx.getSystemService(android.app.NotificationManager::class.java).cancelAll()
             Prefs.clearUserData()
             AppLock.locked.value = true
             Repo.signOut()
@@ -203,24 +248,80 @@ private fun MainShell(me: Profile, activity: MainActivity, signOut: () -> Unit) 
     val ctx = LocalContext.current
     val nav = remember { Nav() }
     val school = rememberLoad(me.id) { Repo.school() }
+    LaunchedEffect(me.id) { Prefs.lastUserId = me.id; Prefs.lastRole = me.role; ReminderScheduler.rearm(ctx) }
     LaunchedEffect(school.data) {
-        school.data?.let { if (me.isStaff) ReminderScheduler.sync(ctx, it, me) }
+        school.data?.let { if (me.isStaff) runCatching { ReminderScheduler.refresh(ctx, me, it) } }
     }
     // A reminder asked us to open a particular class
     val req by activity.openRequest
     LaunchedEffect(req) {
         val r = req ?: return@LaunchedEffect
-        if (me.isStaff) {
+        if (r.batchId == "money") {
+            nav.home()
+            if (me.isAdmin) when (r.kind) { "fees", "claims" -> nav.push(Screen.Fees); "salary" -> if (com.globalinstitute.akademos.data.Features.SALARIES) nav.push(Screen.Salaries) }
+            if (r.kind.startsWith("claim:")) { nav.tab = "CHILD"; nav.claimFor = r.kind.removePrefix("claim:") }
+        } else if (r.batchId == "plan") {
+            if (me.isStaff) { nav.home(); nav.push(Screen.PlanDay(r.date)) }
+        } else if (me.isStaff) {
             nav.home()
             nav.push(Screen.Attendance(r.batchId, r.date, when (r.kind) { "end" -> AttMode.DEPARTURE; "followup" -> AttMode.LATE; else -> AttMode.ARRIVAL }))
         }
         activity.openRequest.value = null
     }
-    BackHandler(enabled = nav.stack.size > 1) { nav.pop() }
+    // Back is a gesture you can hold: the page follows your thumb, the previous page waits
+    // underneath, and you can change your mind half way. Let go past the point and it finishes.
+    val back = remember { androidx.compose.animation.core.Animatable(0f) }
+    var fromLeft by remember { mutableStateOf(true) }
+    val scope = rememberCoroutineScope()
+    androidx.activity.compose.PredictiveBackHandler(enabled = nav.stack.size > 1) { events ->
+        try {
+            events.collect { e -> fromLeft = e.swipeEdge != androidx.activity.BackEventCompat.EDGE_RIGHT; back.snapTo(e.progress) }
+            back.animateTo(1f, Motion.spring(1f, 0.22f))
+            nav.instant = true
+            nav.pop()
+            back.snapTo(0f)
+        } catch (e: kotlin.coroutines.cancellation.CancellationException) {
+            scope.launch { back.animateTo(0f, Motion.Release) }
+            throw e
+        }
+    }
+    LaunchedEffect(nav.stack.size) { nav.instant = false }
+    val reduce = rememberReduceMotion()
 
     val session = SessionCtx(me, activity, nav, school.data, school.reload, signOut)
-    androidx.compose.runtime.CompositionLocalProvider(LocalSession provides session) {
-        AnimatedContent(nav.top, transitionSpec = { pageIn(nav.forward) }, label = "nav") { screen ->
+    androidx.compose.runtime.CompositionLocalProvider(LocalSession provides session, LocalReduceMotion provides reduce) {
+      androidx.compose.foundation.layout.BoxWithConstraints(Modifier.fillMaxSize()) {
+        val w = constraints.maxWidth.toFloat()
+        val dir = if (fromLeft) 1f else -1f
+        // Read the progress only inside draw-phase lambdas, so a swipe doesn't recompose the screens every frame.
+        val swiping by remember { androidx.compose.runtime.derivedStateOf { back.value > 0f } }
+        if (swiping && nav.stack.size > 1) {
+            // The page you're going back to, drifting into place and brightening as you pull.
+            Box(Modifier.fillMaxSize().graphicsLayer { translationX = -dir * w * 0.3f * (1f - back.value) }) {
+                ScreenHost(nav.stack[nav.stack.size - 2], me, school)
+            }
+            Box(Modifier.fillMaxSize().graphicsLayer { alpha = 0.22f * (1f - back.value) }.background(androidx.compose.ui.graphics.Color.Black))
+        }
+        Box(Modifier.fillMaxSize().graphicsLayer {
+            val p = back.value
+            translationX = dir * w * p
+            if (p > 0f) {
+                shadowElevation = 28.dp.toPx() * (1f - p)
+                shape = androidx.compose.foundation.shape.RoundedCornerShape(28.dp * p.coerceAtMost(0.4f) / 0.4f)
+                clip = true
+            }
+        }) {
+        AnimatedContent(nav.top, transitionSpec = {
+            if (nav.instant) (EnterTransition.None togetherWith ExitTransition.None).apply { targetContentZIndex = nav.stack.size.toFloat() }
+            else pageTransition(nav.forward, nav.stack.size, reduce)
+        }, label = "nav") { screen -> ScreenHost(screen, me, school) }
+        }
+      }
+    }
+}
+
+@Composable
+private fun ScreenHost(screen: Screen, me: Profile, school: com.globalinstitute.akademos.ui.components.Load<School>) {
             Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background).imePadding()) {
                 when (screen) {
                     Screen.Home -> if (me.isStaff) StaffHome(school) else ParentHome()
@@ -237,32 +338,45 @@ private fun MainShell(me: Profile, activity: MainActivity, signOut: () -> Unit) 
                     Screen.Keys -> KeysScreen()
                     Screen.People -> PeopleScreen()
                     Screen.Audit -> AuditScreen()
+                    Screen.Fees -> FeesScreen()
+                    is Screen.StudentFees -> StudentFeesScreen(screen.studentId)
+                    Screen.Salaries -> SalariesScreen()
+                    Screen.Earnings -> EarningsScreen()
+                    is Screen.PlanDay -> PlanDayScreen(screen.date)
+                    Screen.TeacherPay -> TeacherPayScreen()
                 }
             }
-        }
-    }
 }
 
 private enum class Tab(val label: String, val icon: androidx.compose.ui.graphics.vector.ImageVector) {
     TODAY("Today", Icons.Rounded.Today), MARKS("Marks", Icons.Rounded.Grading),
     STUDENTS("Students", Icons.Rounded.Groups), ADMIN("Admin", Icons.Rounded.AdminPanelSettings),
-    CHILD("My child", Icons.Rounded.Face), SETTINGS("Settings", Icons.Rounded.Settings),
+    CHILD("Progress", Icons.Rounded.Face), SETTINGS("Settings", Icons.Rounded.Settings),
 }
 
 @Composable
 private fun TabbedHome(tabs: List<Tab>, content: @Composable (Tab) -> Unit) {
-    var current by rememberSaveable { mutableStateOf(tabs.first()) }
-    Column(Modifier.fillMaxSize()) {
-        Box(Modifier.weight(1f)) {
-            AnimatedContent(current, transitionSpec = {
-                val fwd = tabs.indexOf(targetState) > tabs.indexOf(initialState)
-                pageIn(fwd)
-            }, label = "tabs") { t -> content(t) }
+    val nav = LocalSession.current.nav
+    val current = tabs.firstOrNull { it.name == nav.tab } ?: tabs.first()
+    val density = androidx.compose.ui.platform.LocalDensity.current
+    val haptic = androidx.compose.ui.platform.LocalHapticFeedback.current
+    var barHeight by remember { mutableStateOf(0) }
+    // Content runs the full height and scrolls under a translucent tab bar.
+    Box(Modifier.fillMaxSize()) {
+        androidx.compose.runtime.CompositionLocalProvider(LocalBarInset provides with(density) { barHeight.toDp() }) {
+            AnimatedContent(current, transitionSpec = { tabTransition() }, label = "tabs") { t -> content(t) }
         }
+        Column(Modifier.align(Alignment.BottomCenter).fillMaxWidth().onSizeChanged { barHeight = it.height }) {
+            // A soft edge where content meets the bar, instead of a hard line.
+            Box(Modifier.fillMaxWidth().height(14.dp).background(androidx.compose.ui.graphics.Brush.verticalGradient(
+                listOf(androidx.compose.ui.graphics.Color.Transparent, MaterialTheme.colorScheme.background.copy(alpha = 0.5f)))))
         NavigationBar(containerColor = MaterialTheme.colorScheme.surface, tonalElevation = 0.dp) {
             tabs.forEach { t ->
                 NavigationBarItem(
-                    selected = t == current, onClick = { current = t },
+                    selected = t == current, onClick = {
+                        if (t != current) haptic.performHapticFeedback(androidx.compose.ui.hapticfeedback.HapticFeedbackType.SegmentTick)
+                        nav.tab = t.name
+                    },
                     icon = { Icon(t.icon, null, Modifier.size(30.dp)) },
                     label = { Text(t.label, style = MaterialTheme.typography.labelMedium) },
                     colors = NavigationBarItemDefaults.colors(
@@ -273,6 +387,7 @@ private fun TabbedHome(tabs: List<Tab>, content: @Composable (Tab) -> Unit) {
                         unselectedTextColor = MaterialTheme.colorScheme.onSurfaceVariant),
                 )
             }
+        }
         }
     }
 }
@@ -315,7 +430,7 @@ fun Splash() {
 @Composable
 private fun DemoRoot(activity: MainActivity) {
     var role by rememberSaveable { mutableStateOf<String?>(null) }
-    AnimatedContent(role, transitionSpec = { fadeIn(tween(400)) togetherWith fadeOut(tween(250)) }, label = "demo") { r ->
+    AnimatedContent(role, transitionSpec = { fadeIn(Motion.spring(1f, 0.45f)) togetherWith fadeOut(Motion.spring(1f, 0.25f)) }, label = "demo") { r ->
         if (r == null) {
             Column(Modifier.fillMaxSize().imePadding().verticalScroll(rememberScrollState()).statusBarsPadding().navigationBarsPadding().padding(horizontal = 24.dp)) {
                 Brand()
@@ -324,7 +439,7 @@ private fun DemoRoot(activity: MainActivity) {
                     Text("Sample students and classes, nothing is saved. Connect the server to use real data.",
                         style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     Gap(16.dp)
-                    listOf(Roles.ADMIN to "Administrator", Roles.TEACHER to "Teacher", Roles.PARENT to "Parent")
+                    listOf(Roles.ADMIN to "Administrator", Roles.TEACHER to "Teacher", Roles.PARENT to "Student / parent")
                         .forEach { (k, label) ->
                             PrimaryButton(label, { com.globalinstitute.akademos.data.Demo.role = k; Prefs.lastUserId = "demo"; Prefs.lastRole = k; role = k },
                                 Modifier.fillMaxWidth().padding(vertical = 5.dp),
@@ -334,7 +449,9 @@ private fun DemoRoot(activity: MainActivity) {
             }
         } else {
             LaunchedEffect(Unit) { AppLock.locked.value = false }
-            MainShell(com.globalinstitute.akademos.data.Demo.profile, activity) { role = null }
+            MainShell(com.globalinstitute.akademos.data.Demo.profile, activity) {
+                activity.getSystemService(android.app.NotificationManager::class.java).cancelAll(); role = null
+            }
         }
     }
 }

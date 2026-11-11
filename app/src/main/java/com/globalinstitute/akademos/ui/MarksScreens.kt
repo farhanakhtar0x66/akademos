@@ -100,7 +100,7 @@ import java.time.format.DateTimeFormatter
 fun MarksHomeScreen() {
     val s = LocalSession.current
     val sc = s.school
-    LazyColumn(contentPadding = PaddingValues(bottom = 32.dp)) {
+    LazyColumn(contentPadding = PaddingValues(bottom = LocalBarInset.current + 32.dp)) {
         item { ScreenHeader("Marks", "Choose a batch to add a test or enter marks") }
         when {
             sc == null -> item { LoadingBlock() }
@@ -154,7 +154,7 @@ fun TestsScreen(batchId: String) {
         var max by remember { mutableStateOf("100") }
         var err by remember { mutableStateOf<String?>(null) }
         var busy by remember { mutableStateOf(false) }
-        AlertDialog(
+        com.globalinstitute.akademos.ui.components.AkDialog(
             onDismissRequest = { creating = false },
             title = { Text("New test", style = MaterialTheme.typography.headlineSmall) },
             text = {

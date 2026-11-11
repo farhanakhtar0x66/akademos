@@ -1,5 +1,8 @@
 package com.globalinstitute.akademos.ui
 
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
+
 import android.app.TimePickerDialog
 import android.content.ClipData
 import android.content.ClipboardManager
@@ -34,6 +37,9 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.Category
+import androidx.compose.material.icons.rounded.CurrencyRupee
+import androidx.compose.material.icons.rounded.Payments
+import androidx.compose.material.icons.rounded.Savings
 import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.ContentCopy
 import androidx.compose.material.icons.rounded.Delete
@@ -116,26 +122,35 @@ private data class AdminTile(val title: String, val body: String, val icon: Imag
 fun AdminHomeScreen() {
     val s = LocalSession.current
     val tiles = listOf(
-        AdminTile("Access keys", "Invite teachers and parents", Icons.Rounded.Key, Screen.Keys),
-        AdminTile("Batches & timetable", "Who studies what, and when", Icons.Rounded.EventNote, Screen.Batches),
+        AdminTile("Fees", "Who has paid, who hasn't", Icons.Rounded.CurrencyRupee, Screen.Fees),
+        AdminTile("Teacher pay", "Classes taken, pay due", Icons.Rounded.Payments, Screen.TeacherPay),
+        *(if (com.globalinstitute.akademos.data.Features.SALARIES) arrayOf(
+            AdminTile("Salaries", "Pay teachers and staff", Icons.Rounded.Payments, Screen.Salaries),
+            AdminTile("Earnings", "Fees minus salaries", Icons.Rounded.Savings, Screen.Earnings)) else emptyArray()),
+        AdminTile("Access keys", "Invite teachers and families", Icons.Rounded.Key, Screen.Keys),
+        AdminTile("Timetable", "Batches and class times", Icons.Rounded.EventNote, Screen.Batches),
         AdminTile("Students", "Add or edit students", Icons.Rounded.Groups, Screen.StudentsAdmin),
-        AdminTile("Classes", "Class 8, Class 9 …", Icons.Rounded.School, Screen.Classes),
-        AdminTile("Subjects", "English, Science …", Icons.Rounded.MenuBook, Screen.Subjects),
-        AdminTile("People", "Teachers & parents, block access", Icons.Rounded.SupervisorAccount, Screen.People),
-        AdminTile("Activity log", "Every change, who made it", Icons.Rounded.History, Screen.Audit),
+        AdminTile("Classes", "Class 8, Class 9…", Icons.Rounded.School, Screen.Classes),
+        AdminTile("Subjects", "English, Maths…", Icons.Rounded.MenuBook, Screen.Subjects),
+        AdminTile("People", "Block or remove access", Icons.Rounded.SupervisorAccount, Screen.People),
+        AdminTile("Activity log", "Every change, and who", Icons.Rounded.History, Screen.Audit),
     )
     Column(Modifier.fillMaxSize()) {
         ScreenHeader("Admin", "Only you can see this section")
-        LazyVerticalGrid(GridCells.Adaptive(170.dp), contentPadding = PaddingValues(20.dp),
+        LazyVerticalGrid(GridCells.Adaptive(170.dp), contentPadding = PaddingValues(start = 20.dp, top = 20.dp, end = 20.dp, bottom = LocalBarInset.current + 20.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
             items(tiles) { t ->
-                AkCard(onClick = { s.nav.push(t.screen) }) {
-                    Box(Modifier.size(54.dp).clip(RoundedCornerShape(16.dp)).background(MaterialTheme.colorScheme.primaryContainer), contentAlignment = Alignment.Center) {
-                        Icon(t.icon, null, Modifier.size(30.dp), tint = MaterialTheme.colorScheme.onPrimaryContainer)
+                // Icon and padding are fixed; the text part grows with the phone's / app's text size.
+                val tileHeight = with(androidx.compose.ui.platform.LocalDensity.current) { 104.dp + 74.sp.toDp() }
+                // Every tile is the same height, so the grid reads as a grid.
+                AkCard(Modifier.height(tileHeight), onClick = { s.nav.push(t.screen) }) {
+                    Box(Modifier.size(52.dp).clip(RoundedCornerShape(16.dp)).background(MaterialTheme.colorScheme.primaryContainer), contentAlignment = Alignment.Center) {
+                        Icon(t.icon, null, Modifier.size(28.dp), tint = MaterialTheme.colorScheme.onPrimaryContainer)
                     }
-                    Gap(12.dp)
-                    Text(t.title, style = MaterialTheme.typography.titleMedium)
-                    Text(t.body, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Spacer(Modifier.weight(1f))
+                    Text(t.title, style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
+                    Text(t.body, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 2, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis, minLines = 2)
                 }
             }
         }
@@ -252,7 +267,21 @@ fun EditStudentScreen(student: Student?) {
     var active by remember { mutableStateOf(student?.active ?: true) }
     var busy by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
-    FormScreen(if (student == null) "New student" else "Edit student", busy, error, saveEnabled = name.trim().length >= 2, onSave = {
+    var confirmDelete by remember { mutableStateOf(false) }
+    if (confirmDelete && student != null) com.globalinstitute.akademos.ui.components.AkDialog(onDismissRequest = { confirmDelete = false },
+        title = { Text("Remove ${student.fullName} for good?") },
+        text = { Text("Their attendance, marks, answer sheets and fee records will be deleted. This cannot be undone.\n\nIf they have only left, turn off “Currently studying here” instead and their records are kept.") },
+        confirmButton = {
+            TextButton({
+                scope.launch {
+                    runCatching { Repo.deleteStudent(student.id!!) }.onSuccess { confirmDelete = false; s.nav.pop() }
+                        .onFailure { error = it.friendly(); confirmDelete = false }
+                }
+            }) { Text("Delete for good", color = MaterialTheme.colorScheme.error) }
+        },
+        dismissButton = { TextButton({ confirmDelete = false }) { Text("Keep") } })
+    FormScreen(if (student == null) "New student" else "Edit student", busy, error, saveEnabled = name.trim().length >= 2,
+        onDelete = student?.let { { confirmDelete = true } }, onSave = {
         busy = true; error = null
         scope.launch {
             runCatching {
@@ -433,7 +462,7 @@ fun EditBatchScreen(batchId: String?) {
     }
 
     if (confirmDelete && existing != null) {
-        AlertDialog(onDismissRequest = { confirmDelete = false },
+        com.globalinstitute.akademos.ui.components.AkDialog(onDismissRequest = { confirmDelete = false },
             title = { Text("Delete this batch?") },
             text = { Text("“${existing.name}” and all its attendance and test records will be removed for good. This cannot be undone.") },
             confirmButton = {
@@ -463,6 +492,7 @@ fun KeysScreen() {
     var hours by remember { mutableStateOf(48) }
     var q by remember { mutableStateOf("") }
     val chosen = remember { mutableStateListOf<String>() }
+    val batchPick = remember { mutableStateListOf<String>() }
     var busy by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
     var newKey by remember { mutableStateOf<String?>(null) }
@@ -474,11 +504,11 @@ fun KeysScreen() {
                 Text("Make a new key", style = MaterialTheme.typography.titleLarge)
                 Gap(10.dp)
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Chip(role == Roles.PARENT, "Parent", { role = Roles.PARENT })
+                    Chip(role == Roles.PARENT, "Student / parent", { role = Roles.PARENT })
                     Chip(role == Roles.TEACHER, "Teacher", { role = Roles.TEACHER })
                 }
                 Gap(12.dp)
-                BigField(label, { label = it.take(80) }, if (role == Roles.PARENT) "Note (e.g. Riya's mother)" else "Teacher's name")
+                BigField(label, { label = it.take(80) }, if (role == Roles.PARENT) "Note (e.g. Riya, or Riya's mother)" else "Teacher's name")
                 Gap(10.dp)
                 Text("Key stops working after", style = MaterialTheme.typography.titleSmall)
                 Gap(6.dp)
@@ -503,13 +533,33 @@ fun KeysScreen() {
                         }
                     }
                 }
+                AnimatedVisibility(role == Roles.TEACHER) {
+                    Column {
+                        Gap(14.dp)
+                        Text("Which batches will they teach?", style = MaterialTheme.typography.titleSmall)
+                        Text("They become the teacher of these when they use the key. You can change it later in Batches.",
+                            style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Gap(6.dp)
+                        val bs = s.school?.batches.orEmpty().sortedBy { it.teacherId != null }
+                        bs.forEach { b ->
+                            val on = b.id in batchPick
+                            Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).clickable { if (on) batchPick.remove(b.id) else batchPick.add(b.id!!) },
+                                verticalAlignment = Alignment.CenterVertically) {
+                                Checkbox(on, { if (on) batchPick.remove(b.id) else batchPick.add(b.id!!) })
+                                Text(b.name, Modifier.weight(1f), style = MaterialTheme.typography.bodyLarge)
+                                Text(s.school?.person(b.teacherId)?.fullName ?: "No teacher", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                        }
+                    }
+                }
                 error?.let { Gap(); Text(it, color = MaterialTheme.colorScheme.error) }
                 Gap(16.dp)
                 PrimaryButton("Create key", modifier = Modifier.fillMaxWidth(), loading = busy, icon = Icons.Rounded.Key,
                     enabled = label.isNotBlank() && (role == Roles.TEACHER || chosen.isNotEmpty()), onClick = {
                     busy = true; error = null
                     scope.launch {
-                        runCatching { Repo.createInvite(role, label.trim(), if (role == Roles.PARENT) chosen.toList() else emptyList(), hours) }
+                        runCatching { Repo.createInvite(role, label.trim(), if (role == Roles.PARENT) chosen.toList() else emptyList(), hours,
+                            if (role == Roles.TEACHER) batchPick.toList() else emptyList()) }
                             .onSuccess { newKey = it; label = ""; chosen.clear(); invites.reload() }
                             .onFailure { error = it.friendly() }
                         busy = false
@@ -546,7 +596,7 @@ fun KeysScreen() {
     }
 
     newKey?.let { key ->
-        AlertDialog(onDismissRequest = {},
+        com.globalinstitute.akademos.ui.components.AkDialog(onDismissRequest = {},
             title = { Text("Key ready", style = MaterialTheme.typography.headlineSmall) },
             text = {
                 Column {
@@ -580,8 +630,24 @@ fun PeopleScreen() {
     val scope = rememberCoroutineScope()
     val load = rememberLoad(Unit) { Repo.people() }
     var error by remember { mutableStateOf<String?>(null) }
+    var removing by remember { mutableStateOf<com.globalinstitute.akademos.data.Profile?>(null) }
+    removing?.let { p ->
+        com.globalinstitute.akademos.ui.components.AkDialog(onDismissRequest = { removing = null },
+            title = { Text("Remove ${p.fullName}?") },
+            text = { Text("They lose access straight away and would need a new access key to come back." +
+                if (p.role == Roles.TEACHER) " Their batches stay, with no teacher, until you choose a new one." else "") },
+            confirmButton = {
+                TextButton({
+                    scope.launch {
+                        runCatching { Repo.removeUser(p.id) }.onFailure { error = it.friendly() }
+                        removing = null; load.reload(); s.reloadSchool()
+                    }
+                }) { Text("Remove", color = MaterialTheme.colorScheme.error) }
+            },
+            dismissButton = { TextButton({ removing = null }) { Text("Keep") } })
+    }
     LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 32.dp)) {
-        item { ScreenHeader("People", "Switch someone off to block their access at once", onBack = { s.nav.pop() }) }
+        item { ScreenHeader("People", "Switch someone off to block them at once, or remove them", onBack = { s.nav.pop() }) }
         error?.let { item { Text(it, Modifier.padding(horizontal = 20.dp), color = MaterialTheme.colorScheme.error) } }
         val list = load.data
         when {
@@ -594,12 +660,20 @@ fun PeopleScreen() {
                         Spacer(Modifier.width(12.dp))
                         Column(Modifier.weight(1f)) {
                             Text(p.fullName, style = MaterialTheme.typography.titleMedium)
-                            Text(p.role.replaceFirstChar { it.uppercase() } + if (!p.active) "  ·  blocked" else "",
+                            val roleName = when (p.role) { Roles.ADMIN -> "Administrator"; Roles.TEACHER -> "Teacher"; else -> "Student / parent" }
+                            Text(roleName + if (!p.active) "  ·  blocked" else "",
                                 style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            if (p.role != Roles.PARENT) s.school?.batches?.filter { it.teacherId == p.id }?.takeIf { it.isNotEmpty() }?.let { bs ->
+                                Text("Teaches " + bs.joinToString { it.name }, style = MaterialTheme.typography.bodyMedium,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
                         }
-                        if (p.id != s.me.id) Switch(p.active, { on ->
-                            scope.launch { runCatching { Repo.setActive(p.id, on) }.onFailure { error = it.friendly() }; load.reload() }
-                        })
+                        if (p.id != s.me.id) {
+                            Switch(p.active, { on ->
+                                scope.launch { runCatching { Repo.setActive(p.id, on) }.onFailure { error = it.friendly() }; load.reload() }
+                            })
+                            IconButton({ removing = p }) { Icon(Icons.Rounded.Delete, "Remove ${p.fullName}", tint = MaterialTheme.colorScheme.error) }
+                        }
                     }
                 }
             }
@@ -683,14 +757,24 @@ private fun NameDialog(
     var name by remember { mutableStateOf(initial) }
     var busy by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
-    AlertDialog(onDismissRequest = onDismiss,
+    com.globalinstitute.akademos.ui.components.AkDialog(onDismissRequest = onDismiss,
         title = { Text(title, style = MaterialTheme.typography.headlineSmall) },
         text = {
             Column {
                 BigField(name, { name = it.take(40) }, label, keyboard = KeyboardOptions(capitalization = KeyboardCapitalization.Words))
                 extra()
                 error?.let { Gap(); Text(it, color = MaterialTheme.colorScheme.error) }
-                if (onDelete != null) { Gap(); TextButton(onDelete) { Icon(Icons.Rounded.Delete, null); Text(" Delete", color = MaterialTheme.colorScheme.error) } }
+                if (onDelete != null) {
+                    Gap(16.dp)
+                    // Destructive, so it sits apart from Save and is red all the way through (icon and word).
+                    androidx.compose.material3.OutlinedButton(onDelete, Modifier.fillMaxWidth().heightIn(min = 48.dp),
+                        shape = com.globalinstitute.akademos.ui.components.ButtonMetrics.CompactShape,
+                        border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.error.copy(alpha = 0.5f)),
+                        colors = androidx.compose.material3.ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error)) {
+                        Icon(Icons.Rounded.Delete, null, Modifier.size(20.dp)); Spacer(Modifier.width(8.dp))
+                        Text("Delete", style = MaterialTheme.typography.labelLarge)
+                    }
+                }
             }
         },
         confirmButton = {

@@ -150,3 +150,151 @@ data class School(
     fun batch(id: String?) = batches.firstOrNull { it.id == id }
     fun person(id: String?) = staff.firstOrNull { it.id == id }
 }
+
+// ------------------------------------------------------------------ money
+object PayMethod {
+    val all = listOf("cash", "upi", "bank", "cheque", "other")
+    fun label(m: String) = when (m) { "upi" -> "UPI"; "bank" -> "Bank"; "cheque" -> "Cheque"; "cash" -> "Cash"; else -> "Other" }
+}
+
+@Serializable
+data class StudentFee(
+    @SerialName("student_id") val studentId: String,
+    @SerialName("monthly_fee") val monthlyFee: Double,
+    @SerialName("due_day") val dueDay: Int = 10,
+)
+
+@Serializable
+data class FeePayment(
+    val id: String? = null,
+    @SerialName("student_id") val studentId: String,
+    @SerialName("for_month") val forMonth: String,   // yyyy-MM-01
+    val amount: Double,
+    @SerialName("paid_on") val paidOn: String? = null,
+    val method: String = "cash",
+    val note: String? = null,
+)
+
+@Serializable
+data class Payee(
+    val id: String? = null,
+    val name: String,
+    @SerialName("role_label") val roleLabel: String? = null,
+    @SerialName("monthly_salary") val monthlySalary: Double,
+    @SerialName("pay_day") val payDay: Int = 1,
+    val active: Boolean = true,
+)
+
+@Serializable
+data class SalaryPayment(
+    val id: String? = null,
+    @SerialName("payee_id") val payeeId: String,
+    @SerialName("for_month") val forMonth: String,
+    val amount: Double,
+    @SerialName("paid_on") val paidOn: String? = null,
+    val method: String = "bank",
+    val note: String? = null,
+)
+
+// ------------------------------------------------------------------ daily check-in
+object PlanMode {
+    const val USUAL = "usual"
+    const val CUSTOM = "custom"
+    const val OFF = "off"
+}
+
+@Serializable
+data class DayPlan(
+    @SerialName("teacher_id") val teacherId: String,
+    val date: String,
+    val mode: String,
+)
+
+@Serializable
+data class DayClass(
+    val id: String? = null,
+    @SerialName("teacher_id") val teacherId: String,
+    val date: String,
+    @SerialName("batch_id") val batchId: String,
+    @SerialName("start_time") val startTime: String,
+    @SerialName("end_time") val endTime: String,
+)
+
+/** One class actually happening on a date: the usual timing, or what the teacher set for that day. */
+data class Session(
+    val key: String,
+    val batchId: String,
+    val startTime: String,
+    val endTime: String,
+    val teacherId: String?,
+    val changed: Boolean,
+)
+
+class Plans(val plans: List<DayPlan>, val classes: List<DayClass>) {
+    fun plan(teacherId: String?, date: String) = plans.firstOrNull { it.teacherId == teacherId && it.date == date }
+
+    /** The usual weekly timings this teacher has on that weekday. */
+    fun usual(school: School, teacherId: String?, date: java.time.LocalDate): List<Session> =
+        school.slots.filter { sl -> sl.weekday == date.dayOfWeek.value && school.batch(sl.batchId)?.teacherId == teacherId }
+            .map { Session("slot:${it.id}:$date", it.batchId, it.startTime, it.endTime, teacherId, false) }
+            .sortedBy { it.startTime }
+
+    /** Everything happening on [date], with each teacher's check-in applied. */
+    fun sessions(school: School, date: java.time.LocalDate): List<Session> {
+        val d = date.toString()
+        val teachers = school.batches.map { it.teacherId }.distinct() + classes.filter { it.date == d }.map { it.teacherId }
+        return teachers.distinct().flatMap { t -> forTeacher(school, t, date) }.sortedBy { it.startTime }
+    }
+
+    fun forTeacher(school: School, teacherId: String?, date: java.time.LocalDate): List<Session> {
+        val d = date.toString()
+        return when (plan(teacherId, d)?.mode) {
+            PlanMode.OFF -> emptyList()
+            PlanMode.CUSTOM -> classes.filter { it.teacherId == teacherId && it.date == d }
+                .map { Session("day:${it.id ?: (it.batchId + it.startTime)}", it.batchId, it.startTime, it.endTime, teacherId, true) }
+                .sortedBy { it.startTime }
+            else -> usual(school, teacherId, date)
+        }
+    }
+
+    companion object { val EMPTY = Plans(emptyList(), emptyList()) }
+}
+
+// ------------------------------------------------------------------ "I've paid"
+object ClaimStatus {
+    const val PENDING = "pending"
+    const val CONFIRMED = "confirmed"
+    const val REJECTED = "rejected"
+}
+
+@Serializable
+data class FeeClaim(
+    val id: String? = null,
+    @SerialName("student_id") val studentId: String,
+    @SerialName("for_month") val forMonth: String,
+    val amount: Double,
+    val method: String = "upi",
+    val note: String? = null,
+    val status: String = ClaimStatus.PENDING,
+    @SerialName("created_at") val createdAt: String? = null,
+    @SerialName("resolved_at") val resolvedAt: String? = null,
+)
+
+// ------------------------------------------------------------------ teachers' classes and pay
+/** Salaries, payees and the earnings page are switched off for now (switch back on later). */
+object Features { const val SALARIES = false }
+
+@Serializable
+data class ClassTaken(
+    @SerialName("teacher_id") val teacherId: String? = null,
+    @SerialName("batch_id") val batchId: String,
+    val date: String,
+    val present: Int = 0,
+    val total: Int = 0,
+)
+
+@Serializable
+data class TeacherRate(
+    @SerialName("teacher_id") val teacherId: String,
+    @SerialName("per_class") val perClass: Double,
+)
